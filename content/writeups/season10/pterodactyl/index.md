@@ -23,6 +23,17 @@ Pterodactyl is a Linux box built around a real-world attack chain: an unauthenti
 
 The box hosts a Minecraft server homepage alongside a Pterodactyl Panel installation. Enumeration surfaces a misconfigured `phpinfo.php` that reveals the exact PHP configuration needed for a PEAR-based RCE chain. After exploiting CVE-2025-49132 (unauthenticated LFI in the panel) to pivot to RCE, we dump database credentials, crack a user's bcrypt hash, and SSH in. From there, a two-CVE chain targeting udisks2 on OpenSUSE — PAM environment injection to trick Polkit, followed by a SUID binary race on a temporary mount — hands us root.
 
+## Attack Chain at a Glance
+
+1. **Web enumeration** — Exposed `phpinfo.php` and `changelog.txt` reveal PHP-PEAR is installed with `register_argc_argv` enabled
+2. **LFI to RCE** — CVE-2025-49132 (unauthenticated LFI in Pterodactyl Panel) chains with PEAR's `pearcmd.php` to write a webshell
+3. **Credential extraction** — Database credentials from Laravel config → dump MariaDB → crack bcrypt hash → SSH as user
+4. **Privilege escalation** — Two OpenSUSE-specific udisks2 CVEs: PAM environment injection to bypass Polkit, then a SUID race condition on a temporary mount for root
+
+**Tools used:** nmap, gobuster, curl, john, MariaDB client
+
+<div id="protected-marker"></div>
+
 ---
 
 ## Reconnaissance

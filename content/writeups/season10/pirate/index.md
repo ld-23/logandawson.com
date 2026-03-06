@@ -23,6 +23,21 @@ Pirate is a Hard-rated Windows Domain Controller that simulates a real-world int
 
 The target is `DC01.pirate.htb`, a Windows Server 2019 Domain Controller that also runs Hyper-V hosting an ADFS web server (`WEB01` at `192.168.100.2`). Our starting credentials (`pentest:p3nt3st2025!&`) come from the box page, simulating an engagement hand-off. The ADFS infrastructure, gMSA accounts, and a locked-but-active user session on WEB01 are all attack surface — but reaching them requires careful pivoting and a series of non-obvious chained techniques.
 
+## Attack Chain at a Glance
+
+This box chains together six distinct phases across two hosts and two network segments:
+
+1. **Kerberos bootstrapping** — Working around shell metacharacters in the starting password to get a TGT
+2. **gMSA password extraction** — Kerberoasting → machine account creds → reading managed service account NTLM hashes
+3. **ADFS infrastructure compromise** — WinRM as gMSA → DKM key from LDAP → ADFS token signing certificate from WID
+4. **Hyper-V guest pivot** — Tunneling into the internal 192.168.100.0/24 network to reach the ADFS web server
+5. **NTLM relay + RBCD** — Coercing WEB01 authentication → relaying to DC01 LDAPS → resource-based constrained delegation → secretsdump on WEB01
+6. **SPN hijacking + constrained delegation** — Abusing WriteSPN to move a service principal between machine accounts, then leveraging constrained delegation with protocol transition to forge a Domain Admin ticket for DC01
+
+**Tools used:** impacket (getTGT, getST, secretsdump, ntlmrelayx, wmiexec), netexec, Coercer, BloodHound, Ligolo-ng, ADFSpoof, custom Python scripts
+
+<div id="protected-marker"></div>
+
 ---
 
 ## Reconnaissance
