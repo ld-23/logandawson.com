@@ -10,6 +10,7 @@ params:
     os: "Linux (OpenSUSE 15, kernel 6.4.0-150600, nginx 1.21.5, PHP 8.4.8)"
     difficulty: "Easy/Medium"
 ShowToc: true
+protected: true
 ---
 
 # Pterodactyl — HackTheBox Writeup
