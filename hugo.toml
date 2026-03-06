@@ -25,7 +25,7 @@ theme = "PaperMod"
 
   [[params.socialIcons]]
     name = "github"
-    url = "https://github.com/CHANGEME"
+    url = "https://github.com/ld-23"
 
 [params.assets]
   disableFingerprinting = false
