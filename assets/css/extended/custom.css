@@ -1,0 +1,17 @@
+/* Sticky header — locks nav to top on scroll */
+.header {
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+}
+
+/* Slight transparency so content peeks through the blur */
+.dark .header {
+    background: rgba(30, 30, 46, 0.85);
+}
+
+.header {
+    background: rgba(255, 255, 255, 0.85);
+}
