@@ -1,0 +1,11 @@
+<div class="box-info" style="background: var(--code-bg); border-radius: 8px; padding: 1rem 1.5rem; margin-bottom: 1.5rem; border-left: 4px solid var(--primary);">
+  <table style="border: none; margin: 0; width: 100%;">
+    {{ with .Page.Params.params.box }}
+    {{ with .os }}<tr><td style="border: none; padding: 2px 8px; font-weight: bold;">OS</td><td style="border: none; padding: 2px 8px;">{{ . }}</td></tr>{{ end }}
+    {{ with .difficulty }}<tr><td style="border: none; padding: 2px 8px; font-weight: bold;">Difficulty</td><td style="border: none; padding: 2px 8px;">{{ . }}</td></tr>{{ end }}
+    {{ with .release }}<tr><td style="border: none; padding: 2px 8px; font-weight: bold;">Release</td><td style="border: none; padding: 2px 8px;">{{ . }}</td></tr>{{ end }}
+    {{ with .retire }}<tr><td style="border: none; padding: 2px 8px; font-weight: bold;">Retire</td><td style="border: none; padding: 2px 8px;">{{ . }}</td></tr>{{ end }}
+    {{ with .htb_url }}<tr><td style="border: none; padding: 2px 8px; font-weight: bold;">HTB</td><td style="border: none; padding: 2px 8px;"><a href="{{ . }}">Link</a></td></tr>{{ end }}
+    {{ end }}
+  </table>
+</div>
