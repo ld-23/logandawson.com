@@ -1,10 +1,17 @@
 ---
-title: "crocodile"
+title: "Crocodile — HackTheBox Starting Point Walkthrough"
 date: 2026-02-01
 draft: false
-tags: ["linux", "web", "very easy"]
+tags: ["htb-walkthrough", "linux", "web", "ftp", "very easy"]
 categories: ["writeups"]
-summary: ""
+series: ["Starting Point"]
+description: "HackTheBox Crocodile walkthrough: exploit anonymous FTP access to harvest credentials, then brute-force a hidden PHP login page. Very Easy Linux box."
+keywords: ["Crocodile HTB", "HackTheBox Crocodile writeup", "anonymous FTP exploitation", "credential harvesting", "gobuster directory brute force", "vsftpd anonymous login", "PHP login bypass", "hackthebox walkthrough", "very easy linux box", "penetration testing", "web enumeration"]
+summary: "Crocodile proves that the simplest misconfigurations can be devastating — an open FTP server hands you the keys to the web app if you know where to look."
+cover:
+  image: "cover.png"
+  alt: "Crocodile — Very Easy Linux machine walkthrough cover"
+  hidden: false
 params:
   box:
     os: "Linux (Ubuntu)"
@@ -12,79 +19,94 @@ params:
 ShowToc: true
 ---
 
-# Crocodile — HackTheBox Writeup
 
-Crocodile is a very easy Linux box that demonstrates how anonymous FTP access can expose credentials that unlock a web application login. The attack chain is short but teaches a fundamental methodology: always enumerate every open service, because sensitive information on one port can become your key into another.
+# HackTheBox — Crocodile
+
+Crocodile is a Very Easy Linux box that demonstrates how a single misconfigured service can compromise an entire application. By chaining anonymous FTP access with a hidden PHP login page, we go from zero to dashboard without writing a single line of exploit code.
+
+---
+
+## Overview
+
+The attack path here is refreshingly straightforward, but that's exactly what makes it a great learning exercise. Two services are exposed — FTP and HTTP — and neither is particularly hardened. The real skill being tested is *correlation*: recognizing that files sitting on an FTP server might contain exactly the credentials needed to authenticate to the web app running on the same host.
 
 ---
 
 ## Reconnaissance
 
-I started with a service-version scan to understand what was running on the target:
+### Port Scanning
 
-```bash
-nmap -sV -sC <TARGET>
-```
+I started with an Nmap service scan to get a clear picture of what's listening on the box.
 
 ![terminal output](terminal_01.png)
 
-Two services: FTP on port 21 and a web server on port 80. The nmap output immediately flagged something important — anonymous FTP login is allowed, and there are two files sitting in the FTP root with very telling names: `allowed.userlist` and `allowed.userlist.passwd`. That's a gift. Before chasing the web application, those files were the obvious first stop.
+Two ports, two services. What immediately jumps out is the Nmap FTP script output: **anonymous login is allowed**, and the directory listing reveals two suspiciously named files — `allowed.userlist` and `allowed.userlist.passwd`. The naming convention alone is a red flag. These aren't temp files or logs; someone put a credential store on a publicly accessible FTP server.
 
-I also wanted to understand the web attack surface. Just browsing to the site showed a generic Bootstrap business template with no obvious login link — nothing interesting on the surface. That's a hint that there may be pages not linked from the main navigation, so I ran Gobuster with a PHP extension filter to catch any server-side scripts:
+Port 80 is running Apache with what looks like a generic Bootstrap business template — nothing exciting on the surface, but definitely worth enumerating.
+
+### Web Enumeration
+
+Browsing to `http://<TARGET>` confirmed the Bootstrap template — a nice-looking but entirely static marketing page with no obvious login functionality linked anywhere. This is where directory brute-forcing becomes essential. Hidden functionality doesn't advertise itself.
+
+I ran Gobuster with the `-x php` flag specifically to hunt for PHP files, since a login portal is far more likely to be a `.php` endpoint than a directory:
 
 ```bash
-gobuster dir -u http://<TARGET> -w /usr/share/wordlists/dirbuster/directory-list-2.3-medium.txt -x php
+gobuster dir -u http://<TARGET> -w /usr/share/wordlists/dirb/common.txt -x php
 ```
 
 ![terminal output](terminal_02.png)
 
-Two findings worth noting: `/login.php` is the authentication entry point, and `/dashboard/` is likely where authenticated users land. Trying to access `/dashboard/` directly without being logged in redirects back to the login page — so we need valid credentials.
+Two interesting hits: `/login.php` is accessible directly, and `/dashboard/` redirects — almost certainly requiring authentication before it'll show anything useful. Now I have a target. The next step is finding valid credentials to feed into it.
 
 ---
 
 ## Foothold
 
-With a login page identified and anonymous FTP access confirmed, the path forward was clear. I connected to FTP as the anonymous user and pulled both files:
+### Harvesting Credentials via Anonymous FTP
+
+With anonymous FTP access confirmed by Nmap, I connected to the server and grabbed both files without needing to supply a password:
 
 ```bash
 ftp <TARGET>
 ```
 
+At the username prompt, entering `anonymous` (with any password, or none at all) grants access. From there:
+
 ```bash
-ftp> Name: anonymous
-ftp> Password: [blank]
 ftp> get allowed.userlist
 ftp> get allowed.userlist.passwd
 ftp> bye
 ```
 
-Inspecting the files locally revealed exactly what the names implied:
+Reading the files locally reveals the goods:
 
 ![terminal output](terminal_03.png)
 
-Four usernames, four passwords. The key insight here is that when two credential files have a matching line count, the entries are almost certainly paired by line number. This is a common pattern for simple flat-file credential stores — line 1 of the username list corresponds to line 1 of the password list, and so on.
+Four usernames, four passwords — and both files have the same line count. That's not a coincidence. When credential files are structured this way, the most logical interpretation is that they're paired line-by-line: `aron:root`, `pwnmeow:Supersecretpassword1`, and so on. The last pairing gives us `admin:rKXM59ESxesUFHAd`.
 
-That gives us the following pairs:
+I could have written a quick script to try all 16 combinations, but given the small set and the obvious pairing structure, it made more sense to start with the most privileged-sounding account: `admin`.
 
-| Username | Password |
-|---|---|
-| aron | root |
-| pwnmeow | Supersecretpassword1 |
-| egotisticalsw | @BaASD&9032123sADS |
-| admin | rKXM59ESxesUFHAd |
+### Logging In
 
-Rather than brute-forcing all combinations, the line-by-line pairing gives us a logical starting point. The `admin` account is the highest-value target for a web login, so I tried `admin` / `rKXM59ESxesUFHAd` first at `/login.php`.
+Navigating to `http://<TARGET>/login.php` presents a standard username/password form. I entered the `admin` credentials:
 
-It worked. The application authenticated successfully and landed on the dashboard, where the flag was waiting.
+- **Username:** `admin`
+- **Password:** `rKXM59ESxesUFHAd`
+
+One attempt. The page redirected immediately to `/dashboard/`, which displayed the flag.
+
+![terminal output](terminal_04.png)
+
+No bruteforcing tools needed — just careful observation and logical deduction.
 
 ---
 
 ## Lessons Learned
 
-**Anonymous FTP is always worth checking.** It's easy to see FTP on port 21 and move on if you don't immediately get a foothold, but nmap's default scripts will flag anonymous login automatically. Any time you see `ftp-anon: Anonymous FTP login allowed`, treat it as a high-priority lead — servers misconfigured this way frequently have files that were never meant to be public.
+**Anonymous FTP is always worth checking.** It's one of those services that gets enabled during initial setup and forgotten. Even if the FTP server doesn't have anything obviously named "passwords," it's worth browsing for configuration files, backups, or anything that looks out of place.
 
-**Enumerate every service, then combine what you find.** The FTP and HTTP services looked independent, but the credentials from FTP were the direct key into the web application. A piecemeal approach — fully enumerating one service before connecting it to others — is how these cross-service attack chains get missed.
+**Cross-service correlation is a core skill.** The FTP server and the web application are separate services, but they exist on the same host and are managed by the same (presumably overworked) administrator. Credentials, usernames, and configuration details found on one service frequently apply to another. Always think about how findings from one foothold can unlock a different attack surface.
 
-**Extension-based directory brute-forcing catches hidden login pages.** The main site had no visible link to `/login.php`. Running Gobuster with `-x php` found it immediately. If you're only fuzzing for directories without checking for specific file extensions, you'll miss pages like this regularly.
+**Directory brute-forcing with file extension flags matters.** Running Gobuster without `-x php` would have missed `/login.php` entirely if it wasn't indexed or linked from the main page. Always match your extension flags to the tech stack — Apache on Linux commonly serves PHP, so `-x php` is a natural addition. You can layer in others like `-x html,txt` depending on what you suspect.
 
-**Matching line counts in credential files imply line-by-line pairing.** When a username list and a password list have the same number of entries, start with the assumption that they're paired positionally. This avoids the noise of testing every combination and focuses your effort on the most likely valid pairs first.
+**Matching line counts in credential files strongly imply line-by-line pairing.** This is a quick pattern recognition shortcut. When you pull two files named `users` and `passwords` and they have the same number of entries, treat them as paired before reaching for a brute-force tool. Start with the most privileged-looking account (here, `admin`) and work from there.

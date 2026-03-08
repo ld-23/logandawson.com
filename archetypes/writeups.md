@@ -2,8 +2,10 @@
 title: "{{ replace .Name "-" " " | title }}"
 date: {{ .Date }}
 draft: true
-tags: []
+tags: ["htb-walkthrough"]
 categories: ["writeups"]
+description: ""
+keywords: []
 summary: ""
 params:
   box:

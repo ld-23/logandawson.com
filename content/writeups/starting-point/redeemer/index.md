@@ -1,10 +1,17 @@
 ---
-title: "redeemer"
+title: "Redeemer — HackTheBox Starting Point Walkthrough"
 date: 2026-01-30
 draft: false
-tags: ["linux"]
+tags: ["htb-walkthrough", "linux", "privilege-escalation"]
 categories: ["writeups"]
-summary: ""
+series: ["Starting Point"]
+description: "HackTheBox Redeemer walkthrough: exploiting unauthenticated Redis access to retrieve flags. A beginner-friendly intro to Redis enumeration and misconfiguration."
+keywords: ["Redeemer", "HackTheBox", "redis exploitation", "unauthenticated redis", "redis-cli", "nmap full port scan", "hackthebox walkthrough", "penetration testing", "redis misconfiguration", "CTF writeup"]
+summary: "Redeemer proves that sometimes the simplest misconfigurations are the most dangerous — an open Redis instance with no password stands between you and the flag."
+cover:
+  image: "cover.png"
+  alt: "Redeemer — HackTheBox Linux machine walkthrough cover"
+  hidden: false
 params:
   box:
     os: "Linux"
@@ -12,17 +19,16 @@ params:
 ShowToc: true
 ---
 
-# Redeemer
 
-Redeemer is a beginner-friendly HackTheBox machine that demonstrates one of the most common real-world misconfigurations you'll encounter: an exposed Redis instance with no authentication. There's no exploitation involved here — just enumeration, awareness that interesting services live outside the default nmap port range, and knowing a handful of Redis commands.
+# HackTheBox — Redeemer
+
+Redeemer is a beginner-friendly Linux box that demonstrates one of the most common and dangerous misconfigurations in modern infrastructure: a Redis instance exposed to the network with no authentication. Getting the flag requires nothing more than knowing where to look and how to talk to the service.
 
 ---
 
 ## Overview
 
-The box runs a single exposed service — Redis 5.0.7 on port 6379 — configured with no password. The flag is stored directly as a key in the database. The entire challenge boils down to: find the service, connect to it, dump the keys.
-
-Simple as that sounds, it teaches a genuinely important lesson about thorough port scanning and the dangers of default Redis deployments.
+Redis is an in-memory key-value store that's ubiquitous in web stacks — used for caching, session management, queues, and more. By default, Redis ships with no password requirement and listens on all interfaces, which is catastrophic when it's reachable from untrusted networks. This box is a clean illustration of why full port scans matter and why "default secure" is a phrase that doesn't apply to Redis.
 
 ---
 
@@ -30,15 +36,13 @@ Simple as that sounds, it teaches a genuinely important lesson about thorough po
 
 ### Full Port Scan
 
-The first thing I always do is a full port scan rather than relying on nmap's default top-1000 ports. Port 6379 (Redis) sits outside that default range, so if I'd run a vanilla `nmap $TARGET` and moved on, I would have found nothing. This is exactly the kind of box that reinforces the habit.
-
-I use `--min-rate 5000` to push packets through quickly on a full 65535-port sweep:
+The first thing I always do on any HTB box is a full port scan. Nmap's default behavior only checks the top 1000 ports, and Redis listens on 6379 — a port that doesn't make that list. If I had stopped at a default scan, I'd have seen nothing.
 
 ```bash
 nmap -p- --min-rate 5000 $TARGET
 ```
 
-Once that surfaces port 6379, I follow up with a targeted service/version scan:
+The `--min-rate 5000` flag tells Nmap to send at least 5000 packets per second, which makes scanning all 65,535 ports practical rather than a multi-hour wait. Once the full scan surfaced port 6379, I ran a targeted service scan:
 
 ```bash
 nmap -p 6379 -sC -sV $TARGET
@@ -46,72 +50,50 @@ nmap -p 6379 -sC -sV $TARGET
 
 ![terminal output](terminal_01.png)
 
-Redis 5.0.7. One open port, one interesting service. Time to understand what we're dealing with.
-
-### What Is Redis?
-
-Redis (Remote Dictionary Server) is an in-memory key-value store, commonly used for caching, session management, and message queuing. It's incredibly fast and widely deployed — which also means it's widely misconfigured. By default, Redis binds to all interfaces and requires **no authentication**. In a properly hardened environment it should either be bound to localhost, firewalled, or protected with a `requirepass` directive in `redis.conf`. On this box, none of that is in place.
+One open port: Redis 5.0.7. The version is slightly dated, but more importantly — no authentication banner, no TLS, just a wide-open key-value store.
 
 ---
 
 ## Foothold
 
-### Connecting to Redis
+### Connecting to Redis Unauthenticated
 
-The `redis-cli` tool is the standard client for interacting with Redis. Connecting is as simple as pointing it at the target host:
+Redis exposes a straightforward text-based protocol, and `redis-cli` is the standard client for interacting with it. Since there's no password configured, connecting is as simple as pointing the tool at the target host:
 
 ```bash
 redis-cli -h $TARGET
 ```
 
-No password prompt. We're in immediately.
+Once connected, I ran `INFO` to confirm we had a working connection and to pull basic server metadata — things like the Redis version, OS, memory usage, and importantly, whether `requirepass` is set. It wasn't.
 
-### Enumerating the Instance
-
-The first thing I run on any Redis instance is `INFO` — it returns a detailed breakdown of the server's configuration, memory usage, connected clients, and more. This is useful for confirming the version and understanding the environment:
-
-```bash
-127.0.0.1:6379> INFO
-```
-
-The output confirms Redis 5.0.7 and shows the server is running as the default configuration with no authentication required. Nothing surprising here, but it's good practice to gather this before diving into the data.
-
-### Dumping the Keys
-
-With unauthenticated access confirmed, I use `KEYS *` to list every key stored in the database:
-
-```bash
-127.0.0.1:6379> KEYS *
-```
+With a foothold on the service, the next step is figuring out what data is actually stored. The `KEYS *` command dumps every key in the current database — something you'd never run in production against a large dataset, but perfectly reasonable in a CTF context:
 
 ![terminal output](terminal_02.png)
 
-Four keys. The `flag` key is an obvious target. Retrieving the value of any key is done with `GET`:
+Four keys. One of them is named `flag`, which isn't subtle. Retrieving a value from Redis is a single command:
 
 ```bash
-127.0.0.1:6379> GET flag
+GET flag
 ```
 
 ![terminal output](terminal_03.png)
 
-That's the flag. Root-level access — or in this case, database-level access — achieved without a single exploit.
+That's it. No exploit, no shellcode, no lateral movement — just unauthenticated access to a misconfigured service handing over its data.
 
 ---
 
 ## Privilege Escalation
 
-Not applicable. The flag was stored directly as a plaintext value in the Redis database. There's no operating system to escalate on — the entire challenge lives within the database layer.
-
-In a real engagement, unauthenticated Redis access is often far more dangerous than retrieving a single value. Depending on the server configuration, it's sometimes possible to write SSH public keys to disk via Redis's `CONFIG SET dir` and `CONFIG SET dbfilename` commands, effectively achieving remote code execution. That's out of scope here, but worth keeping in mind as a follow-on technique when you encounter Redis in a real pentest.
+There's no privilege escalation path here. The flag was stored as a plain Redis key, accessible to anyone who could reach the port. The "vulnerability" is entirely at the access control layer — or rather, the complete absence of one.
 
 ---
 
 ## Lessons Learned
 
-**Always scan all 65535 ports.** Nmap's default scan covers roughly the top 1000 most common ports. Redis on 6379 isn't in that list. A lazy scan on this box returns nothing — a full `-p-` scan reveals everything. Make full port scans part of your standard workflow, and use `--min-rate 5000` to keep them from taking forever.
+**Scan all 65,535 ports.** This is the most important takeaway from this box. If you run a default Nmap scan and call it done, you'll miss services like Redis (6379), MongoDB (27017), and plenty of others that live outside the top-1000 list. The `-p-` flag combined with `--min-rate 5000` is my standard first pass on HTB machines — fast enough to be practical, thorough enough to not miss anything.
 
-**Redis has no authentication by default.** This is a documented, known-default behavior that routinely appears in real-world penetration tests and bug bounty programs. Any Redis instance exposed to a network without `requirepass` configured is a sitting duck. If you're deploying Redis, bind it to localhost or use a firewall rule — and always set a strong password.
+**Redis has no authentication by default.** This is a well-documented issue that keeps showing up in real-world breach reports. Redis was designed to run inside a trusted network perimeter, not exposed to the internet or untrusted segments. The fix is straightforward: set `requirepass` in `redis.conf` and bind the service to localhost or a specific interface rather than `0.0.0.0`. In 2024, there's no excuse for an internet-facing Redis instance without authentication.
 
-**`KEYS *` and `GET` are your two-tool Redis enumeration kit.** For a misconfigured instance, that's often all you need. In production Redis instances with large datasets, `KEYS *` can be destructive (it blocks the server while scanning), but for CTF purposes and small instances it's perfectly fine.
+**`KEYS *` and `GET` are all you need to pillage a misconfigured instance.** In a real engagement, you'd also want to look at `CONFIG GET *` (which can reveal sensitive configuration details), `CONFIG SET dir` and `CONFIG SET dbfilename` (which can be abused to write files to disk, potentially achieving RCE), and `SLAVEOF` (which can be used in replication-based exploitation chains). Redeemer keeps it simple, but the rabbit hole goes much deeper.
 
-**Dead ends to note:** I initially ran a default nmap scan out of habit and got zero results — a good reminder of why the `-p-` flag matters. There's no web interface, no SSH, nothing else to pivot through. The entire attack surface is a single unauthenticated service, and the lesson is recognizing it quickly.
+**Simple misconfigurations are often the most dangerous.** Redeemer isn't a box about obscure CVEs or complex exploit chains — it's about a default setting that's been wrong since Redis was first released. In real penetration tests, these are frequently the findings that have the highest impact: not because they're clever, but because they're overlooked.

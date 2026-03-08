@@ -1,10 +1,17 @@
 ---
-title: "oopsie"
+title: "Oopsie — HackTheBox Starting Point Walkthrough"
 date: 2026-01-31
 draft: false
-tags: ["linux", "web"]
+tags: ["htb-walkthrough", "linux", "web", "ssh", "privilege-escalation", "reverse-shell"]
 categories: ["writeups"]
-summary: ""
+series: ["Starting Point"]
+description: "HackTheBox Oopsie walkthrough: exploit IDOR, broken access control, and PHP upload to get a shell, then escalate via SUID PATH hijacking to root."
+keywords: ["Oopsie", "HackTheBox walkthrough", "IDOR", "broken access control", "PHP reverse shell", "SUID PATH hijacking", "credential reuse", "file upload vulnerability", "privilege escalation", "web enumeration", "penetration testing", "bugtracker exploit"]
+summary: "Oopsie chains credential reuse, a cookie-based IDOR, and a file upload to land a shell — then a SUID binary with an unsafe PATH gets us root. A masterclass in chained misconfigurations."
+cover:
+  image: "cover.png"
+  alt: "Oopsie — HackTheBox Linux machine walkthrough cover"
+  hidden: false
 params:
   box:
     os: "Linux (Ubuntu)"
@@ -12,9 +19,16 @@ params:
 ShowToc: true
 ---
 
-# Oopsie
 
-Oopsie is a beginner-friendly Linux box that chains together several classic web application vulnerabilities — broken access control, an insecure file upload, and a SUID PATH hijacking — into a satisfying end-to-end compromise. What makes it particularly interesting is that it rewards players who remember their history: credentials from a previous box in the Starting Point series come back to bite the target here.
+# HackTheBox — Oopsie Writeup
+
+Oopsie is a beginner-friendly Linux box that teaches one of the most important lessons in penetration testing: how a chain of small misconfigurations becomes a full compromise. We go from a hidden login panel to a root shell by exploiting credential reuse, broken cookie-based access control, an unrestricted file upload, hardcoded database credentials, and finally a SUID binary vulnerable to PATH hijacking.
+
+---
+
+## Overview
+
+The attack path here is beautifully illustrative of real-world web application weaknesses. Nothing on this box requires exotic exploitation — every step is a textbook finding that security teams miss every day. If you've done the Archetype box before this one, you'll even get a head start, because the developers of MegaCorp apparently believe in password reuse.
 
 ---
 
@@ -22,7 +36,7 @@ Oopsie is a beginner-friendly Linux box that chains together several classic web
 
 ### Port Scanning
 
-I started with a default nmap scan to get the lay of the land:
+I started with a default nmap service scan to get a lay of the land:
 
 ```bash
 nmap -sC -sV $TARGET
@@ -30,71 +44,95 @@ nmap -sC -sV $TARGET
 
 ![terminal output](terminal_01.png)
 
-Two services. SSH on 22 is the typical Ubuntu stack — without credentials it's a dead end at this stage, so the web server on port 80 is where the action is.
+Two open ports. SSH (22) is running OpenSSH 7.6p1 — I noted the version but set it aside. Without credentials or a known CVE to exploit here, SSH is a door I'll come back to rather than knock on first. HTTP (80) is the obvious target, running Apache 2.4.29 on Ubuntu.
 
 ### Web Enumeration
 
-Hitting the site in a browser revealed a corporate-looking page for a company called MegaCorp. Nothing immediately obvious on the surface, so I started looking at the page source. Buried in the HTML was a reference that pointed me toward `/cdn-cgi/login/` — a login panel that isn't linked anywhere obvious in the navigation.
+Browsing to the site, I was greeted by what looked like a corporate web app for a company called MegaCorp. Nothing immediately interesting on the surface, but checking the page source revealed something useful: `admin@megacorp.com`. A potential username to keep in mind.
 
-The source also handed me an email address: `admin@megacorp.com`. That's a useful username to pocket.
+The more interesting discovery came from directory enumeration. Poking around (and checking source code carefully), a login panel appeared tucked away at:
 
-Before trying anything clever, I tried the guest login option the page offered. It worked, and it dropped me into the application with a limited session. Poking around in the browser dev tools, I noticed the session was tracked by two cookies: `role` and `user`. The `role` cookie was set to `guest` and `user` was set to a numeric ID.
+```
+http://<TARGET>/cdn-cgi/login/
+```
 
-This is a red flag. Client-side cookies controlling authorization is fundamentally broken — the server has to trust whatever value the client sends, which means we control our own privilege level.
+`/cdn-cgi/` is a path associated with Cloudflare services, so it's the kind of directory that often gets overlooked by automated scanners configured to filter noise. Worth always checking manually.
 
-I also spotted that the account detail pages used an `id` parameter in the URL to look up user profiles. Classic IDOR territory. I iterated through values until I found the admin account profile, which revealed the admin's Access ID: **34322**.
+The login page offered two options: log in with credentials, or continue as a guest. I chose guest first to understand the application's structure before trying anything aggressive.
+
+### Mapping the Application as Guest
+
+Logged in as a guest, I could browse limited sections of the app. The URL structure caught my eye immediately:
+
+```
+http://<TARGET>/cdn-cgi/login/admin.php?content=accounts&id=2
+```
+
+That `id` parameter screams IDOR (Insecure Direct Object Reference). The application was using a numeric ID to look up accounts and returning information directly — no server-side check that the requesting user was authorized to view that account. I iterated through values manually and found the admin account at `id=1`, which revealed:
+
+- **Email:** `admin@megacorp.com`
+- **Access ID:** `34322`
+
+That Access ID was the key detail — the application used it in the session cookie.
 
 ---
 
 ## Foothold
 
-### Logging In with Reused Credentials
+### Breaking In — Credential Reuse
 
-If you've worked through the Starting Point series before Oopsie, you may have already met `MEGACORP_4dm1n!!` — that was the admin password from Archetype. Credential reuse across an organization's systems is depressingly common in real engagements, so it's always worth trying known passwords against new targets before reaching for bigger tools.
+If you've completed the Archetype box (another MegaCorp machine in the HTB Starting Point series), you may recognize the credentials `admin` / `MEGACORP_4dm1n!!`. Organizations in the real world absolutely reuse passwords across systems, and HTB simulates this beautifully across their starting point series. I tried these credentials on the login form and got in.
 
-Logging in as `admin` / `MEGACORP_4dm1n!!` worked immediately.
+### Escalating to Admin — Broken Cookie-Based Access Control
 
-### Exploiting Broken Access Control
+Logged in as admin via the form, I noticed the application was storing my role and identity in plain cookies:
 
-I was in, but my session cookie still reflected a limited role. I flipped that:
+```
+role=admin
+user=34322
+```
 
-- `role` → `admin`
-- `user` → `34322`
+The `user` value was the Access ID I'd already found via IDOR. The critical flaw here: the application was trusting these cookies to enforce authorization. This is broken access control by design — any user can open their browser's developer tools and modify these values. Server-side session validation should determine what a user can do, never a client-controlled value.
 
-After refreshing, the application now showed me the Uploads page — functionality that wasn't accessible before. The server was trusting the role value I sent in the cookie without validating it server-side. That's the entire vulnerability: authorization logic living in a place the user can modify.
+Even though I was already logged in as admin, this is worth understanding because it means any guest could have escalated to admin by:
+1. Using the IDOR to find the admin's Access ID (34322)
+2. Changing their `user` cookie to `34322` and their `role` cookie to `admin`
+
+With full admin access, I found an **Uploads** section that wasn't available to regular users. Time to upload a shell.
 
 ### Uploading a PHP Reverse Shell
 
-The Uploads page accepted file uploads without any meaningful restriction on file type. I grabbed the standard PHP reverse shell from `/usr/share/webshells/php/php-reverse-shell.php`, updated the IP and port to point back at my machine, and uploaded it.
+I grabbed the classic PentestMonkey PHP reverse shell, updated the IP and port, and uploaded it through the Uploads interface. The server accepted it without any file type validation.
 
-Before triggering the shell, I set up a listener:
+I set up my listener:
 
 ```bash
 nc -lvnp 4444
 ```
 
-Then I navigated to `/uploads/shell.php` in the browser. The page hung — always a good sign — and my listener caught the connection:
+Then triggered the shell by navigating to:
+
+```
+http://<TARGET>/uploads/shell.php
+```
 
 ![terminal output](terminal_02.png)
 
-We're in as `www-data`. Time to stabilize the shell before doing anything else:
+I had a shell as `www-data`. First thing I did was upgrade to a proper PTY so I'd have a stable interactive shell:
 
 ```bash
 python3 -c 'import pty; pty.spawn("/bin/bash")'
-# Ctrl+Z to background
-stty raw -echo; fg
-export TERM=xterm
 ```
 
-This gives us a proper interactive shell with tab completion and the ability to use `su` — which we'll need shortly.
+Then background the shell with `Ctrl+Z`, run `stty raw -echo; fg`, and hit Enter twice. Now I have arrow keys, tab completion, and job control — much better for enumeration.
 
 ---
 
 ## Privilege Escalation
 
-### Finding Database Credentials
+### Step 1: Finding Credentials in Web Application Files
 
-As `www-data`, one of the first things worth doing is poking around the web application's source files. Configuration files often contain hardcoded credentials, and developers have a habit of reusing those credentials for system accounts too.
+`www-data` is the web server user, which means I had read access to the web application's source files. Config files in web apps are a goldmine for credentials. I checked the login directory where we first found the panel:
 
 ```bash
 cat /var/www/html/cdn-cgi/login/db.php
@@ -102,34 +140,40 @@ cat /var/www/html/cdn-cgi/login/db.php
 
 ![terminal output](terminal_03.png)
 
-A username and password for the database — but more usefully, a username that might also be a system account.
+Database credentials: `robert` / `M3g4C0rpUs3r!`. Now — will robert reuse his database password as his system password? Spoiler: yes.
 
-### Lateral Movement to Robert
+### Step 2: Lateral Movement to Robert
 
 ```bash
 su robert
 # Password: M3g4C0rpUs3r!
 ```
 
-It worked. Password reuse strikes again. We can now grab the user flag from `/home/robert/user.txt`.
+That worked. I was now operating as `robert`, which let me grab the user flag from `/home/robert/user.txt`.
 
-### Enumerating Robert's Groups
+### Step 3: Enumerating Robert's Groups
 
-With a new user context, I checked what groups Robert belonged to:
+Before reaching for LinPEAS, I do some quick manual enumeration. Checking robert's group memberships:
 
 ```bash
 id
 ```
 
-![terminal output](terminal_04.png)
+```
+uid=1000(robert) gid=1000(robert) groups=1000(robert),1001(bugtracker)
+```
 
-The `bugtracker` group is non-standard — anything custom like this is worth investigating. I looked for files owned by or accessible to that group:
+The `bugtracker` group is non-standard — that's interesting. Groups like this usually exist because a specific file or binary is assigned to them. I went looking:
 
 ```bash
 find / -group bugtracker 2>/dev/null
 ```
 
-This returned `/usr/bin/bugtracker`. Checking its permissions:
+```
+/usr/bin/bugtracker
+```
+
+### Step 4: Analyzing the SUID Binary
 
 ```bash
 ls -la /usr/bin/bugtracker
@@ -139,55 +183,56 @@ ls -la /usr/bin/bugtracker
 -rwsr-xr-- 1 root bugtracker 8792 Jan 25  2020 /usr/bin/bugtracker
 ```
 
-The `s` in the owner execute position means this is a **SUID binary** owned by root. When Robert runs it, it executes with root privileges. This is the escalation path — now I just needed to understand what it does.
+The `s` in the permissions means this binary runs as root (SUID) regardless of who executes it. Since robert is in the `bugtracker` group, he can run it. The question is: can we abuse it?
 
-### Analyzing the Binary
-
-Rather than running it blind, I used `strings` to peek at what commands the binary calls internally:
+Before running it blindly, I ran `strings` on the binary to see what it does internally:
 
 ```bash
 strings /usr/bin/bugtracker
 ```
 
-Among the output, one line stood out:
+![terminal output](terminal_04.png)
 
-```
-cat /root/reports/
-```
+There it is. The binary takes a bug ID from user input, constructs a file path under `/var/reports/`, and then calls `cat` to display the file — **without using the full path to `cat`**. It's calling just `cat`, which means the shell will resolve it using the `$PATH` environment variable.
 
-The binary calls `cat` to display bug reports from a root-owned directory. Critically, it calls `cat` **without an absolute path** — just the bare command name. That means it relies on whatever `cat` is first found in the `$PATH` environment variable.
+This is a classic PATH hijacking vulnerability. If I can control `$PATH` and put a malicious `cat` binary earlier in the search order, the SUID binary will execute my `cat` as root.
 
-This is a textbook PATH hijacking vulnerability.
+### Step 5: PATH Hijacking to Root
 
-### PATH Hijacking to Root
-
-The attack is straightforward: create a malicious `cat` executable in a directory we control, then prepend that directory to `$PATH` so the SUID binary picks up our version instead of the real one.
+The attack is straightforward:
 
 ```bash
+# Create a fake 'cat' that spawns bash instead
 echo '/bin/bash' > /tmp/cat
 chmod +x /tmp/cat
+
+# Prepend /tmp to PATH so our fake cat is found first
 export PATH=/tmp:$PATH
+
+# Run the SUID binary
 /usr/bin/bugtracker
 ```
 
-When prompted for a bug ID, I entered any value. The binary tried to call `cat` on the corresponding report file — but it called *our* `cat` instead, which just spawned `/bin/bash`. Since the binary is SUID root, that bash process inherited root privileges:
+When prompted for a bug ID, I entered anything (say, `1`). The binary tried to call `cat /var/reports/1`, but found `/tmp/cat` first in the PATH — which spawned a shell running as root.
 
 ![terminal output](terminal_05.png)
 
-Root shell. We can grab the root flag from `/root/root.txt`.
+Root shell obtained. The root flag was sitting in `/root/root.txt`.
 
 ---
 
 ## Lessons Learned
 
-**Credential reuse is your friend on engagements.** The admin password from Archetype worked here without modification. Always try credentials you've already found against new services and systems — it's low effort and pays off more often than you'd expect.
+**Credential reuse is rampant.** The same password appearing on Archetype showed up here. When you compromise one system in an organization, always try those credentials everywhere else — web apps, SSH, databases, other machines on the network.
 
-**Client-side authorization is not authorization.** Storing the user's role in a cookie and trusting it server-side is the same as having no access control at all. Authorization decisions must be made and enforced on the server, validated against a session stored server-side.
+**Cookie-based access control is broken by design.** Authorization decisions must be made server-side using session state that the user cannot manipulate. Cookies are readable and writable by the client. Anything in a cookie can be tampered with.
 
-**Config files are goldmines.** `db.php`, `config.php`, `.env` — these files routinely contain credentials, and those credentials routinely get reused. When you have filesystem access, always grep the web root for connection strings and passwords.
+**Always read web application config files.** Files like `db.php`, `config.php`, and `.env` frequently contain hardcoded credentials. These are often the fastest path from web app access to system access.
 
-**SUID + relative command paths = PATH hijack.** Whenever you find a SUID binary, run `strings` on it and look for commands called without full paths. If you find one, check whether the binary's owner group (or world execute permission) allows you to run it, then drop a malicious version of that command earlier in your `$PATH`.
+**IDOR requires authorization validation on every request.** The `id` parameter vulnerability here let a guest enumerate admin account details. Every request to a resource should verify the requesting user has permission to access *that specific resource*, not just that they're logged in.
 
-**`find / -group <groupname>`** is a quick way to surface files associated with non-standard groups. Unusual group memberships often exist for a reason — follow them.
+**`strings` on binaries reveals their behavior without needing to reverse engineer them.** Spotting that `cat` was called without a full path was a one-command discovery.
 
-**Shell stabilization matters.** The PTY upgrade technique (spawn a pty with Python, background with Ctrl+Z, `stty raw -echo`, foreground) gives you a fully interactive shell that supports `su`, job control, and autocomplete. Get comfortable making this reflex after every initial shell catch.
+**SUID binaries that call external commands without absolute paths are vulnerable to PATH hijacking.** The fix is simple: always use full paths (e.g., `/bin/cat` instead of `cat`) in privileged binaries. As a tester, always check what commands SUID binaries invoke.
+
+**Shell stabilization matters.** Getting a raw `nc` shell is a starting point, not an endpoint. Upgrading to a full PTY with the Python pty technique gives you a much more functional shell for extended enumeration.

