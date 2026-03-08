@@ -1,0 +1,24 @@
+{{- $related := .Site.RegularPages.Related . | first 5 -}}
+{{- $filtered := slice -}}
+{{- range $related -}}
+  {{- if and (ne .Permalink $.Permalink) (in .Params.categories "writeups") -}}
+    {{- $filtered = $filtered | append . -}}
+  {{- end -}}
+{{- end -}}
+{{- $filtered = $filtered | first 3 -}}
+{{- if $filtered }}
+<div class="related-posts">
+  <h2>Related Writeups</h2>
+  <ul>
+    {{- range $filtered }}
+    <li>
+      <a href="{{ .RelPermalink }}">{{ .Title }}</a>
+      {{- with .Params.box }}
+        {{- if .difficulty }} <span class="related-meta">{{ .difficulty }}</span>{{ end }}
+        {{- if .os }} <span class="related-meta">{{ .os }}</span>{{ end }}
+      {{- end }}
+    </li>
+    {{- end }}
+  </ul>
+</div>
+{{- end }}

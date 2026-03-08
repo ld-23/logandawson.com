@@ -5,3 +5,29 @@
     z-index: 100;
     background: var(--theme);
 }
+
+/* Related writeups section */
+.related-posts {
+    margin-top: 2rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--border);
+}
+.related-posts h2 {
+    font-size: 1.2rem;
+    margin-bottom: 0.8rem;
+}
+.related-posts ul {
+    list-style: none;
+    padding: 0;
+}
+.related-posts li {
+    padding: 0.3rem 0;
+}
+.related-posts a {
+    color: var(--primary);
+}
+.related-meta {
+    font-size: 0.8rem;
+    color: var(--secondary);
+    margin-left: 0.4rem;
+}

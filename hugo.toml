@@ -51,6 +51,17 @@ enableRobotsTXT = true
   [markup.goldmark.renderer]
     unsafe = true
 
+[related]
+  includeNewer = true
+  threshold = 40
+  toLower = true
+  [[related.indices]]
+    name = "tags"
+    weight = 100
+  [[related.indices]]
+    name = "series"
+    weight = 50
+
 [outputs]
   home = ["HTML", "RSS", "JSON"]
 
