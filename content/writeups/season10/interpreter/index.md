@@ -32,6 +32,7 @@ The attack path looks like this: exploit CVE-2023-43208 to land a shell as the `
 
 ---
 
+
 ## Reconnaissance
 
 ### Port Scan

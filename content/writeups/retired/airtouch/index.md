@@ -16,6 +16,7 @@ params:
   box:
     os: "Linux"
     difficulty: "Medium"
+protected: true
 ShowToc: true
 ---
 
@@ -31,6 +32,8 @@ AirTouch is one of the most realistic wireless-focused boxes I've encountered on
 The kill chain spans three network segments: a Consultant VLAN (where we land), a Tablets VLAN (reachable via cracked WPA-PSK), and a Corp VLAN (protected by WPA-Enterprise). Getting through each layer teaches something different — SNMP credential leakage, WPA handshake capture and cracking, session cookie manipulation, web shell upload, real-cert evil twin construction, and finally MSCHAPv2 capture and cracking with hashcat. The flags live deep in the Corp VLAN, which means there are no shortcuts.
 
 ---
+
+<div id="protected-marker"></div>
 
 ## Reconnaissance
 

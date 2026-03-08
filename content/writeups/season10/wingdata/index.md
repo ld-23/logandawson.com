@@ -16,6 +16,7 @@ params:
   box:
     os: "Linux (Debian 12 bookworm)"
     difficulty: "Easy"
+protected: true
 ShowToc: true
 ---
 
@@ -25,6 +26,8 @@ ShowToc: true
 WingData is an Easy-rated Linux box that punches well above its weight, chaining two brand-new CVEs into a clean root. You'll exploit an unauthenticated RCE in Wing FTP Server via NULL byte injection, crack salted SHA-256 hashes to pivot laterally, then abuse a subtle Python `tarfile` sandbox bypass to overwrite root's SSH authorized keys. Both vulnerabilities were disclosed in 2025 — this box is a great excuse to study them properly.
 
 ---
+
+<div id="protected-marker"></div>
 
 ## Reconnaissance
 

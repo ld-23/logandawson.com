@@ -16,6 +16,7 @@ params:
   box:
     os: "Linux (Ubuntu 24.04, Apache 2.4.58, OpenSSH 9.6p1)"
     difficulty: "Easy"
+protected: true
 ShowToc: true
 ---
 
@@ -31,6 +32,8 @@ CCTV is an Easy-rated Linux box that hides a surprisingly rich attack chain behi
 The box exposes a ZoneMinder CCTV management interface running with default credentials and, more critically, an unchanged JWT secret. Forging a superadmin token unlocks filter-based command execution, giving us a shell as `www-data`. From there, cracked database credentials get us SSH access as `mark`, and a locally-bound motionEye instance running as root provides the final escalation — once you understand that its stored SHA-1 password hash *is* the API credential, not something you need to crack.
 
 ---
+
+<div id="protected-marker"></div>
 
 ## Reconnaissance
 

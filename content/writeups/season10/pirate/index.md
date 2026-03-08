@@ -16,6 +16,7 @@ params:
   box:
     os: "Windows Server 2019 (Domain Controller)"
     difficulty: "Hard"
+protected: true
 ShowToc: true
 ---
 
@@ -43,6 +44,8 @@ The box provides low-privilege domain credentials (`pentest:p3nt3st2025!&`) to s
 It's a long chain. Let's get into it.
 
 ---
+
+<div id="protected-marker"></div>
 
 ## Reconnaissance
 

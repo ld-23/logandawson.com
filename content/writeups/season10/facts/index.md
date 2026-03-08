@@ -16,6 +16,7 @@ params:
   box:
     os: "Linux (Ubuntu)"
     difficulty: "Season 10 Release Arena"
+protected: true
 ShowToc: true
 ---
 
@@ -25,6 +26,8 @@ ShowToc: true
 Facts is a Linux box that chains together three distinct mistakes: a mass-assignment vulnerability in CamaleonCMS that lets any registered user promote themselves to admin, S3 credentials left sitting in the CMS settings panel, and a `sudo` rule granting unrestricted code execution through Puppet's `facter` tool. Each step unlocks the next, and the whole thing hangs together around a pleasing theme — trivia content, a tool literally named after "facts," and a username pulled from a cracked SSH key that points back to the box name.
 
 ---
+
+<div id="protected-marker"></div>
 
 ## Reconnaissance
 

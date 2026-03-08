@@ -16,6 +16,7 @@ params:
   box:
     os: "Linux (OpenSUSE 15, kernel 6.4.0-150600, nginx 1.21.5, PHP 8.4.8)"
     difficulty: "Easy/Medium"
+protected: true
 ShowToc: true
 ---
 
@@ -31,6 +32,8 @@ Pterodactyl is a medium-difficulty Linux box that chains together two freshly-di
 The box presents a Minecraft server landing page at its surface, but dig a little and you find an exposed `phpinfo.php`, a changelog that lists every interesting piece of configuration, and a Pterodactyl Panel instance on a virtual host. From there, CVE-2025-49132 gives unauthenticated LFI → RCE. Database credentials cracked from the panel's user table get us SSH. Root comes from chaining CVE-2025-6018 (PAM environment injection on SUSE that tricks Polkit into treating an SSH session as a local console) with CVE-2025-6019 (udisks2 temporarily mounting a filesystem without `nosuid`/`nodev`, letting a SUID binary on that image execute as root).
 
 ---
+
+<div id="protected-marker"></div>
 
 ## Reconnaissance
 
