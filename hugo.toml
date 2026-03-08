@@ -72,6 +72,18 @@ enableRobotsTXT = true
   weight = 10
 
 [[menu.main]]
+  identifier = "tutorials"
+  name = "Tutorials"
+  url = "/tutorials/"
+  weight = 15
+
+[[menu.main]]
+  identifier = "homelab"
+  name = "Homelab"
+  url = "/homelab/"
+  weight = 18
+
+[[menu.main]]
   identifier = "tags"
   name = "Tags"
   url = "/tags/"
