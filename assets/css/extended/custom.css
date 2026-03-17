@@ -31,3 +31,50 @@
     color: var(--secondary);
     margin-left: 0.4rem;
 }
+
+/* Spoiler section for protected writeups */
+.spoiler-section {
+    margin-top: 2rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+}
+
+.spoiler-section summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 1rem 1.5rem;
+    background: var(--code-bg);
+    cursor: pointer;
+    user-select: none;
+    font-weight: 600;
+    font-size: 1.05rem;
+    color: var(--primary);
+    list-style: none;
+}
+
+.spoiler-section summary::-webkit-details-marker {
+    display: none;
+}
+
+.spoiler-section summary::marker {
+    content: "";
+}
+
+.spoiler-section summary:hover {
+    background: var(--border);
+}
+
+.spoiler-chevron {
+    transition: transform 0.2s ease;
+    flex-shrink: 0;
+}
+
+.spoiler-section[open] .spoiler-chevron {
+    transform: rotate(180deg);
+}
+
+.spoiler-content {
+    padding: 0 0.5rem;
+}

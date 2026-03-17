@@ -1,0 +1,39 @@
+<script>
+(function() {
+    var marker = document.getElementById('protected-marker');
+    if (!marker) return;
+
+    var details = document.createElement('details');
+    details.className = 'spoiler-section';
+
+    var summary = document.createElement('summary');
+    summary.innerHTML = '<span class="spoiler-label">Click to reveal full writeup</span>' +
+        '<svg class="spoiler-chevron" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>';
+    details.appendChild(summary);
+
+    var wrapper = document.createElement('div');
+    wrapper.className = 'spoiler-content';
+
+    // Move all siblings after marker into wrapper
+    var sibling = marker.nextElementSibling;
+    while (sibling) {
+        var next = sibling.nextElementSibling;
+        wrapper.appendChild(sibling);
+        sibling = next;
+    }
+
+    details.appendChild(wrapper);
+    marker.parentNode.replaceChild(details, marker);
+
+    // Auto-open spoiler when navigating to an anchor inside it
+    function openIfHash() {
+        if (!location.hash) return;
+        var target = document.getElementById(decodeURIComponent(location.hash.slice(1)));
+        if (target && target.closest && target.closest('details.spoiler-section')) {
+            details.open = true;
+        }
+    }
+    openIfHash();
+    window.addEventListener('hashchange', openIfHash);
+})();
+</script>
