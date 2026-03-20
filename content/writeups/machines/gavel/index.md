@@ -1,10 +1,10 @@
 ---
-title: "Gavel — HackTheBox Retired Walkthrough"
+title: "Gavel — HackTheBox Walkthrough"
 date: 2026-03-07
 draft: false
 tags: ["htb-walkthrough", "linux", "web", "mysql", "ssh", "privilege-escalation", "reverse-shell", "sql-injection", "medium", "oscp-prep"]
 categories: ["writeups"]
-series: ["Retired Machines"]
+series: ["Machines"]
 description: "HackTheBox Gavel walkthrough: exploit an exposed .git directory, PDO emulated prepared statement SQLi, and a PHP sandbox self-destruct to root a medium Linux box."
 keywords: ["hackthebox gavel", "gavel walkthrough", "PDO emulated prepared statements", "sql injection", "runkit_function_add", "PHP sandbox escape", "disable_functions bypass", "git dumper", "hackthebox medium", "penetration testing", "linux privilege escalation", "htb-walkthrough"]
 summary: "Gavel chains an exposed git repo, a subtle PDO prepared statement SQL injection, and a creative PHP sandbox escape — overwriting the php.ini from inside the sandbox itself — to reach root."

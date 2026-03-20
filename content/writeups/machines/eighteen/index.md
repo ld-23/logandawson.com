@@ -1,10 +1,10 @@
 ---
-title: "Eighteen — HackTheBox Retired Walkthrough"
+title: "Eighteen — HackTheBox Walkthrough"
 date: 2026-02-27
 draft: false
 tags: ["htb-walkthrough", "windows", "active-directory", "mssql", "web", "smb", "privilege-escalation", "reverse-shell", "cve"]
 categories: ["writeups"]
-series: ["Retired Machines"]
+series: ["Machines"]
 description: "HackTheBox Eighteen writeup: exploit BadSuccessor (CVE-2025-53779) on Windows Server 2025 DC via MSSQL impersonation, hash cracking, and dMSA abuse for DCSync."
 keywords: ["Eighteen HackTheBox", "BadSuccessor CVE-2025-53779", "dMSA abuse", "MSSQL impersonation", "Werkzeug PBKDF2 hash cracking", "hackthebox walkthrough", "Windows Server 2025 privilege escalation", "DCSync attack", "impacket getST", "chisel SOCKS tunnel", "hashcat", "BloodHound"]
 summary: "Eighteen is a Windows Server 2025 Domain Controller box that chains MSSQL impersonation, Werkzeug hash cracking, and the newly-disclosed BadSuccessor vulnerability (CVE-2025-53779) to achieve full domain compromise — a rare chance to exploit a live DC in a lab environment."

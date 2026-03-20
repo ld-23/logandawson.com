@@ -1,10 +1,10 @@
 ---
-title: "AirTouch — HackTheBox Retired Walkthrough"
+title: "AirTouch — HackTheBox Walkthrough"
 date: 2026-03-06
 draft: false
 tags: ["htb-walkthrough", "linux", "web", "docker", "ssh", "privilege-escalation", "reverse-shell", "wireless", "medium", "oscp-prep"]
 categories: ["writeups"]
-series: ["Retired Machines"]
+series: ["Machines"]
 description: "AirTouch HTB medium box walkthrough: crack WPA-PSK, capture MSCHAPv2 via evil twin with real RADIUS certs, pivot through WiFi VLANs to root. Full methodology."
 keywords: ["AirTouch", "HackTheBox", "evil twin attack", "WPA-PSK cracking", "MSCHAPv2", "eaphammer", "SNMP enumeration", "WPA-Enterprise", "airodump-ng", "hackthebox walkthrough", "wireless penetration testing", "mac80211_hwsim"]
 summary: "AirTouch is a unique HTB medium box where you pivot through three network segments entirely over WiFi — cracking WPA-PSK, stealing session cookies from decrypted traffic, and pulling off a real-cert evil twin attack to capture MSCHAPv2 credentials."

@@ -1,10 +1,10 @@
 ---
-title: "Principal — HackTheBox Retired Walkthrough"
+title: "Principal — HackTheBox Walkthrough"
 date: 2026-03-12
 draft: false
 tags: ["htb-walkthrough", "linux", "web", "ssh", "privilege-escalation", "cve", "jwt", "medium", "oscp-prep"]
 categories: ["writeups"]
-series: ["Retired Machines"]
+series: ["Machines"]
 description: "Principal HTB Medium walkthrough: exploit CVE-2026-29000 pac4j-jwt alg:none bypass to forge admin JWE tokens, then escalate via SSH CA certificate forgery to root."
 keywords: ["Principal HackTheBox", "CVE-2026-29000", "pac4j-jwt alg none bypass", "JWE token forgery", "SSH CA certificate forgery", "hackthebox walkthrough", "JWT authentication bypass", "RSA-OAEP-256", "ssh-keygen certificate signing", "Spring Boot JWT", "medium htb", "penetration testing"]
 summary: "Principal chains a fresh CVE in pac4j-jwt — where encryption was mistaken for authentication — with SSH CA key abuse to go from zero to root on a Java Spring Boot platform."
@@ -192,7 +192,7 @@ ssh -i /tmp/principal_key root@<TARGET>
 
 ![root shell on Principal obtained by SSH certificate signed with stolen CA private key](terminal_04.png)
 
-The `-n root` flag in `ssh-keygen -s` is what sets the certificate principal. Without `AuthorizedPrincipalsFile` constraining which principals are valid for which accounts, the default matching gives us root immediately. We saw SSH being used as an escalation vector in [AirTouch](/writeups/retired/airtouch/) as well, though the mechanism there was quite different.
+The `-n root` flag in `ssh-keygen -s` is what sets the certificate principal. Without `AuthorizedPrincipalsFile` constraining which principals are valid for which accounts, the default matching gives us root immediately. We saw SSH being used as an escalation vector in [AirTouch](/writeups/machines/airtouch/) as well, though the mechanism there was quite different.
 
 ---
 

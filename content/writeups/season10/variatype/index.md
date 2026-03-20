@@ -116,7 +116,7 @@ subprocess.run(['fonttools', 'varLib', 'config.designspace'], cwd=workdir)
 
 The `cwd` is a temp directory under `/tmp/variatype_uploads/<tmpdir>/` and the output font path is controlled by the `<variable-font filename="...">` attribute in the `.designspace` XML. That's our next attack surface.
 
-Always validate assumptions by reading source when you can — this LFI just saved us significant guesswork about how `varLib` is invoked. The `str_replace("../", "")` bypass is a classic mistake; we covered a similar single-pass sanitization failure in [Browsed](/writeups/retired/browsed/).
+Always validate assumptions by reading source when you can — this LFI just saved us significant guesswork about how `varLib` is invoked. The `str_replace("../", "")` bypass is a classic mistake; we covered a similar single-pass sanitization failure in [Browsed](/writeups/machines/browsed/).
 
 ### CVE-2025-66034 — fonttools varLib Arbitrary File Write
 

@@ -1,10 +1,10 @@
 ---
-title: "Eloquia — HackTheBox Retired Walkthrough"
+title: "Eloquia — HackTheBox Walkthrough"
 date: 2025-12-13
 draft: false
 tags: ["htb-walkthrough", "windows", "web", "privilege-escalation", "insane", "angularjs-csti", "sqlite", "oauth", "dpapi", "dotnet"]
 categories: ["writeups"]
-series: ["Retired Machines"]
+series: ["Machines"]
 description: "Eloquia HTB Insane walkthrough: AngularJS CSTI cookie theft, SQLite VACUUM INTO for DB dump, NTLM coercion, load_extension RCE, and .NET AppDomainManager injection for SYSTEM."
 protected: true
 keywords: ["Eloquia", "HackTheBox walkthrough", "AngularJS CSTI", "SQLite load_extension", "VACUUM INTO", "AppDomainManager injection", "DPAPI decryption", "OAuth account takeover", "django-sql-explorer", "NTLM coercion", "Windows privilege escalation", "insane htb"]
@@ -305,7 +305,7 @@ Root flag: [redacted]
 
 **AngularJS / CSTI**
 
-The `ng-focus` + `autofocus tabindex="0"` combination is a reliable headless-Chrome trigger. It fires without user interaction. If `sessionid` lacks `HttpOnly` and an admin bot visits user-controlled content, cookie exfiltration is essentially trivial — as we saw when we abused a similar XSS vector in [Browsed](/writeups/retired/browsed/).
+The `ng-focus` + `autofocus tabindex="0"` combination is a reliable headless-Chrome trigger. It fires without user interaction. If `sessionid` lacks `HttpOnly` and an admin bot visits user-controlled content, cookie exfiltration is essentially trivial — as we saw when we abused a similar XSS vector in [Browsed](/writeups/machines/browsed/).
 
 **Django Admin**
 

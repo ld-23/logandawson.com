@@ -1,10 +1,10 @@
 ---
-title: "Browsed — HackTheBox Retired Walkthrough"
+title: "Browsed — HackTheBox Walkthrough"
 date: 2026-01-10
 draft: false
 tags: ["htb-walkthrough", "linux", "web", "ssh", "privilege-escalation", "medium", "oscp-prep"]
 categories: ["writeups"]
-series: ["Retired Machines"]
+series: ["Machines"]
 description: "HackTheBox Browsed walkthrough: exploit a Chrome extension upload feature via bash arithmetic injection and Python __pycache__ poisoning to root. Medium Linux box."
 keywords: ["Browsed", "HackTheBox", "hackthebox walkthrough", "chrome extension exploit", "bash arithmetic injection", "python pycache poisoning", "service worker exploit", "CSP bypass", "linux privilege escalation", "medium htb", "chrome scripting executeScript", "penetration testing"]
 summary: "Browsed is a devious medium Linux box where you weaponize a Chrome extension upload feature to chain browser automation, bash arithmetic injection, and Python bytecode poisoning into a full root compromise."
@@ -335,7 +335,7 @@ Flask's default `<string:param>` URL converter treats `/` as a path separator an
 World-writable `__pycache__` directories are a privilege escalation vector when a privileged process imports Python modules. Python prefers `.pyc` bytecode over source if the header's mtime and source size match — both are attacker-controlled. Preserve the original module's exports to avoid import errors, add your payload at module scope so it runs on import, and patch the header to match the source file's `stat` output.
 
 **5. Always check `__pycache__` permissions.**
-It's easy to lock down a `.py` file but forget the `__pycache__` directory next to it. Tools like `linpeas` will flag world-writable directories, but it's worth checking manually in paths referenced by sudo rules. This is conceptually similar to the writable Docker socket escalation we abused in [AirTouch](/writeups/retired/airtouch/) — a side channel into a privileged process that the main file permissions don't protect.
+It's easy to lock down a `.py` file but forget the `__pycache__` directory next to it. Tools like `linpeas` will flag world-writable directories, but it's worth checking manually in paths referenced by sudo rules. This is conceptually similar to the writable Docker socket escalation we abused in [AirTouch](/writeups/machines/airtouch/) — a side channel into a privileged process that the main file permissions don't protect.
 
 **6. Chrome's Content-Type enforcement.**
 The upload endpoint validates `Content-Type: application/zip` server-side, not just by file extension. Always set the MIME type explicitly when scripting file uploads — `curl`'s default multipart type won't match, and you'll waste time wondering why the server rejects valid zip files.

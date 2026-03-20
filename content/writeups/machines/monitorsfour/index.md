@@ -1,10 +1,10 @@
 ---
-title: "Monitorsfour — HackTheBox Retired Walkthrough"
+title: "Monitorsfour — HackTheBox Walkthrough"
 date: 2026-02-06
 draft: false
 tags: ["htb-walkthrough", "windows", "web", "docker", "privilege-escalation", "reverse-shell", "cve", "medium", "oscp-prep"]
 categories: ["writeups"]
-series: ["Retired Machines"]
+series: ["Machines"]
 description: "MonitorsFour HTB writeup: exploit Cacti CVE-2025-24367 RCE, then pivot through an unauthenticated Docker API to escape to the Windows host. Medium difficulty."
 keywords: ["MonitorsFour", "HackTheBox", "CVE-2025-24367", "Cacti RCE", "Docker API exploit", "container escape", "hackthebox walkthrough", "penetration testing", "fscan", "docker privileged container", "WinRM", "medium box"]
 summary: "MonitorsFour chains a fresh Cacti RCE vulnerability with an exposed Docker API to go from web login to full Windows host compromise — a great lesson in container escape methodology."

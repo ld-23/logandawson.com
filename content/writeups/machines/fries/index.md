@@ -1,11 +1,11 @@
 ---
-title: "Fries — HackTheBox Retired Walkthrough"
+title: "Fries — HackTheBox Walkthrough"
 date: 2025-11-22
 draft: false
 protected: true
 tags: ["htb-walkthrough", "windows", "active-directory", "web", "docker", "smb", "ssh", "privilege-escalation", "cve", "hard"]
 categories: ["writeups"]
-series: ["Retired Machines"]
+series: ["Machines"]
 description: "HackTheBox Fries walkthrough: Hard Windows AD box chaining CVE-2025-2945 pgAdmin RCE, Docker CA hijack, PWM LDAP poisoning, gMSA abuse, and ADCS ESC6/ESC7 to Domain Admin."
 keywords: ["hackthebox fries", "fries walkthrough", "htb-walkthrough", "CVE-2025-2945", "pgAdmin RCE", "ADCS ESC7", "ESC6 strong mapping bypass", "gMSA abuse", "Docker CA hijack", "PWM LDAP poisoning", "certipy-ad", "active directory certificate services", "hard windows htb"]
 summary: "Fries is a Hard Windows box that takes you through a dense multi-layer attack chain: credential leaks in Gitea, authenticated RCE in pgAdmin, Docker CA key theft, LDAP credential poisoning, and finally ADCS certificate abuse to own the domain."
@@ -158,7 +158,7 @@ docker --tlsverify --tlscacert=ca.pem --tlscert=cert.pem --tlskey=key.pem \
   -H=tcp://127.0.0.1:2376 ps
 ```
 
-Full Docker API access. The same Docker CA key hijack approach is conceptually similar to what we saw in [AirTouch](/writeups/retired/airtouch/) with container escape techniques, though the specific TLS forgery vector is unique to this box.
+Full Docker API access. The same Docker CA key hijack approach is conceptually similar to what we saw in [AirTouch](/writeups/machines/airtouch/) with container escape techniques, though the specific TLS forgery vector is unique to this box.
 
 ### Step 5: PWM LDAP Poisoning → `svc_infra` Credentials
 

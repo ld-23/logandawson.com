@@ -1,11 +1,11 @@
 ---
-title: "Conversor — HackTheBox Retired Walkthrough"
+title: "Conversor — HackTheBox Walkthrough"
 date: 2025-10-25
 draft: false
 tags: ["htb-walkthrough", "linux", "web", "ssh", "privilege-escalation", "cve", "xslt", "path-traversal", "easy", "oscp-prep"]
 protected: true
 categories: ["writeups"]
-series: ["Retired Machines"]
+series: ["Machines"]
 description: "Conversor HTB walkthrough: exploit XSLT document() file read, path traversal RCE via cron, and CVE-2024-48990 needrestart PYTHONPATH injection for root."
 keywords: ["Conversor", "HackTheBox walkthrough", "XSLT injection", "path traversal", "CVE-2024-48990", "needrestart exploit", "PYTHONPATH injection", "Flask secret key", "lxml XSLT", "cron privilege escalation", "file upload bypass", "linux ctf"]
 summary: "A Flask-based XML/XSLT converter with exposed source code, an unsanitized file upload, and a cron-powered RCE — topped off with a fresh needrestart CVE for root."

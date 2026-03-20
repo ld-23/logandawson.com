@@ -1,11 +1,11 @@
 ---
-title: "Overwatch — HackTheBox Retired Walkthrough"
+title: "Overwatch — HackTheBox Walkthrough"
 date: 2026-01-24
 draft: false
 protected: true
 tags: ["htb-walkthrough", "windows", "active-directory", "mssql", "smb", "privilege-escalation", "dns-poisoning", "wcf", "medium", "oscp-prep"]
 categories: ["writeups"]
-series: ["Retired Machines"]
+series: ["Machines"]
 description: "Overwatch HTB walkthrough: exploit MSSQL linked server DNS poisoning to capture cleartext creds, then pivot through WCF PowerShell injection to SYSTEM on this medium Windows AD box."
 keywords: ["Overwatch HackTheBox", "hackthebox walkthrough", "MSSQL linked server attack", "DNS poisoning active directory", "WCF PowerShell injection", "NTLM relay", "responder mssql", "active directory privilege escalation", "windows penetration testing", "krbrelayx dnstool", "mssql xp_dirtree", "medium hackthebox"]
 summary: "Overwatch chains MSSQL linked server credential capture via DNS poisoning with a WCF service PowerShell injection to go from unauthenticated to Domain Admin on a Windows Server 2022 DC."
@@ -307,7 +307,7 @@ We're Domain Admin. Both flags collected.
 
 ## Lessons Learned
 
-**DNS poisoning for linked servers is devastatingly effective.** When a MSSQL linked server references a hostname not in DNS, any authenticated domain user can add that record to AD-integrated DNS using `krbrelayx/dnstool.py`. The server then connects to you instead, handing over credentials. The attack requires no special privileges — just domain user access. This is similar to the MSSQL-based credential capture techniques we explored in [Eighteen](/writeups/retired/eighteen/), though the mechanism here is more subtle.
+**DNS poisoning for linked servers is devastatingly effective.** When a MSSQL linked server references a hostname not in DNS, any authenticated domain user can add that record to AD-integrated DNS using `krbrelayx/dnstool.py`. The server then connects to you instead, handing over credentials. The attack requires no special privileges — just domain user access. This is similar to the MSSQL-based credential capture techniques we explored in [Eighteen](/writeups/machines/eighteen/), though the mechanism here is more subtle.
 
 **MSSQL linked servers leak cleartext SQL credentials.** Unlike NTLM authentication (which requires cracking or relaying), SQL auth over linked server connections sends passwords in the clear. Responder's MSSQL honeypot captures these without any post-processing. No wordlist, no GPU time.
 
