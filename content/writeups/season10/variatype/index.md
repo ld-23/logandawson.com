@@ -1,7 +1,7 @@
 ---
 title: "VariaType — HackTheBox Season 10 Walkthrough"
 date: 2026-03-14
-draft: true
+draft: false
 tags: ["htb-walkthrough", "linux", "web", "ssh", "privilege-escalation", "cve", "medium", "oscp-prep"]
 categories: ["writeups"]
 series: ["Season 10"]
